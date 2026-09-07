@@ -10,10 +10,13 @@ import {
 	ApprovalGate,
 	BridgeClient,
 	probeDaemons,
+	type BridgeEvent,
+	type ClientSession,
 	type ClientTarget,
 	type DaemonHealth,
 	type PluginCommand,
 	type PushSocketLike,
+	type SessionRoute,
 } from "./agentdeck.js";
 import {
 	deckStateForOmpEvent,
@@ -47,6 +50,7 @@ export interface BridgeDeps {
 	gateSchedule?: ((fn: () => void, ms: number) => void) | undefined;
 	gateTimeoutMs?: number | undefined;
 	clientSchedule?: ((fn: () => void, ms: number) => void) | undefined;
+	onSessionRoute?: ((route: SessionRoute) => void) | undefined;
 	onShutdown?: (() => void) | undefined;
 }
 
@@ -200,21 +204,27 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			ctx.ui.notify("AgentDeck: v1 requires the Node daemon (sameSocketControl). Telemetry off.");
 			return;
 		}
+		const session: ClientSession = {
+			sessionId: resolveSessionId(event, ctx, deps.sessionId),
+			port: deps.bridgePort,
+			projectName: deps.projectName ?? (ctx.cwd === undefined ? undefined : basename(ctx.cwd)),
+			host: deps.host,
+		};
+		// Live snapshot: the same frames the worker emits on focus_down. Shared
+		// with the loopback relay so this endpoint paints authoritative local
+		// state; the closure reads live gate state, never a cached copy.
+		const snapshot = (): BridgeEvent[] => [
+			stateUpdate(),
+			...(pending ? [{ type: "prompt_options", ...pending.prompt, requestId: pending.requestId }] : []),
+		];
+		deps.onSessionRoute?.({ session, target, snapshot });
 		client = new BridgeClient(
-			{
-				sessionId: resolveSessionId(event, ctx, deps.sessionId),
-				port: deps.bridgePort,
-				projectName: deps.projectName ?? (ctx.cwd === undefined ? undefined : basename(ctx.cwd)),
-				host: deps.host,
-			},
+			session,
 			{ ...target, sameSocketControl: true },
 			deps.createSocket,
 			deps.clientSchedule,
 		);
-		client.setReverseControl(applyCommand, () => [
-			stateUpdate(),
-			...(pending ? [{ type: "prompt_options", ...pending.prompt, requestId: pending.requestId }] : []),
-		]);
+		client.setReverseControl(applyCommand, snapshot);
 		client.setOnConnect(() => {
 			// Re-push the live state: first connect sends idle, a
 			// reconnect resends whatever the session is doing now.

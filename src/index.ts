@@ -3,23 +3,12 @@
  *
  * OMP imports this module with Bun and executes the default-export factory
  * once per session. All behavior lives in `registerBridge`; this file only
- * binds real I/O: loopback `/health`, daemon `/health` probes, and sockets.
+ * binds real I/O: the loopback session endpoint (`/health` plus the TUI
+ * relay), daemon `/health` probes, and sockets.
  */
-import { adaptSocket, type ClientTarget } from "./agentdeck.js";
+import { adaptSocket, type ClientTarget, type SessionRoute } from "./agentdeck.js";
 import { registerBridge, type BridgePi } from "./extension.js";
-
-declare const Bun:
-	| {
-			serve(options: {
-				hostname: string;
-				port: number;
-				fetch(request: Request): Response | Promise<Response>;
-			}): {
-				port: number;
-				stop(): void;
-			};
-	  }
-	| undefined;
+import { openSessionEndpoint } from "./session-relay.js";
 
 async function fetchHealth(port: number) {
 	try {
@@ -36,31 +25,19 @@ async function fetchHealth(port: number) {
 	}
 }
 
-/** Loopback `/health` so daemon reachability probes see this session. */
-function openHealthServer(): { port: number; stop(): void } | null {
-	try {
-		if (typeof Bun === "undefined") return null;
-		return Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			fetch(request) {
-				const url = new URL(request.url);
-				if (url.pathname === "/health") return Response.json({ status: "ok", mode: "session-bridge" });
-				return new Response("Not Found", { status: 404 });
-			},
-		});
-	} catch {
-		return null;
-	}
-}
-
 export default function (pi: BridgePi): undefined {
-	const healthServer = openHealthServer();
+	// Bound before the worker connects so the advertised port is live by
+	// `session_start`; the route resolves via the lifecycle hook below.
+	let route: SessionRoute | null = null;
+	const endpoint = openSessionEndpoint(() => route);
 	registerBridge(pi, {
-		bridgePort: healthServer?.port ?? 0,
+		bridgePort: endpoint?.port ?? 0,
 		fetchHealth,
 		createSocket: (target: ClientTarget) => adaptSocket(new WebSocket(`ws://127.0.0.1:${target.port}`)),
-		onShutdown: () => healthServer?.stop(),
+		onSessionRoute: (resolved) => {
+			route = resolved;
+		},
+		onShutdown: () => endpoint?.stop(),
 	});
 	return undefined;
 }

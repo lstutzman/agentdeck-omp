@@ -8,6 +8,7 @@ assert.equal(health.sameSocketControl, true);
 const deck = [];
 const rpc = [];
 let socket = new WebSocket(`ws://127.0.0.1:${port}`);
+const registrySocket = socket;
 socket.onmessage = (event) => deck.push(JSON.parse(String(event.data)));
 async function until(predicate, label, timeout = 30000) {
   const deadline = Date.now() + timeout;
@@ -53,10 +54,21 @@ try {
   await until(() => rpc.some((x) => x.id === "identity"), "OMP identity");
   sessionId = rpc.find((x) => x.id === "identity").data.sessionId;
   await until(() => deck.some((x) => x.type === "sessions_list" && x.sessions.some((s) => s.id === sessionId)), "real session registration");
+  const registered = deck.findLast((x) => x.type === "sessions_list" && x.sessions.some((s) => s.id === sessionId));
+  const sessionPort = registered.sessions.find((s) => s.id === sessionId).port;
+  assert(Number.isInteger(sessionPort) && sessionPort > 0 && sessionPort !== port);
+  registrySocket.onmessage = (event) => {
+    const frame = JSON.parse(String(event.data));
+    if (frame.type === "sessions_list") deck.push(frame);
+  };
+  const switchedAt = deck.length;
+  socket = new WebSocket(`ws://127.0.0.1:${sessionPort}`);
+  socket.onmessage = (event) => deck.push(JSON.parse(String(event.data)));
+  await until(() => socket.readyState === WebSocket.OPEN, "advertised session endpoint");
+  socket.send(JSON.stringify({ type: "client_register", clientType: "tui" }));
+  await until(() => deck.slice(switchedAt).some((x) => x.type === "state_update" && x.sessionId === sessionId), "switched session snapshot");
   const send = (command) => socket.send(JSON.stringify({ ...command, sessionId }));
-  send({ type: "focus_session" });
-  await until(() => deck.some((x) => x.type === "state_update" && x.sessionId === sessionId), "focused snapshot");
-  console.log("PASS real OMP registration and focused snapshot");
+  console.log("PASS real OMP registration and advertised endpoint session switching");
   for (const [index, expectedError] of [[1, true], [0, false]]) {
     const startDeck = deck.length;
     const startRpc = rpc.length;
@@ -149,5 +161,6 @@ try {
     }
   } finally {
     socket.close();
+    registrySocket.close();
   }
 }

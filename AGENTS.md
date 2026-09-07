@@ -54,10 +54,11 @@ block and release a pending tool gate before aborting the OMP turn.
 Verified against installed OMP **18.1.11** and AgentDeck Node bridge **1.2.1**,
 revision `0c84109396c7e0bd32886554765e7a84a0f064d2`:
 
-- `bun test && bun run check && bun run smoke`: 46 tests pass, TypeScript passes,
+- `bun test && bun run check && bun run smoke`: 51 tests pass, TypeScript passes,
   and all 15 fake-daemon smoke assertions pass.
 - `bun scripts/live-smoke.mjs`: a fresh real OMP process registers with the
-  isolated daemon on 9139. Idle prompts reach OMP. Deny blocks an actual read;
+  isolated daemon on 9139, and its controller switches to the advertised OMP
+  endpoint before exercising controls. Idle prompts reach OMP. Deny blocks an actual read;
   Allow returns the real package data. Interrupt releases a pending approval
   within the five-second check. EOF shutdown removes the remote session.
 - `AGENTDECK_TEST_RECONNECT=1 bun scripts/live-smoke.mjs`: after restarting
@@ -67,10 +68,29 @@ revision `0c84109396c7e0bd32886554765e7a84a0f064d2`:
   current generation, and answers `STEERING_CONFIRMED`. The final live run
   enabled both streaming and reconnect checks and passed every scenario.
 
-These controls were sent over AgentDeck's real WebSocket, not through physical
-buttons. The upstream `dashboard` command is a monitoring TUI, not a web page
-or an approval widget. The TUI was launched, but the rendered OMP row and
-physical Stream Deck+ controls remain unverified. Do not report hardware parity.
+The automated controls above use AgentDeck's real WebSocket, not physical
+buttons. Separate live verification on 2026-09-07 established:
+
+- The installed Stream Deck plugin connects to isolated Node daemon 9139 when
+  Stream Deck launches with `AGENTDECK_DATA_DIR` pointing to the isolated data.
+  The editor renders the OMP session. An MCP Session Slot press opens its detail
+  view. MCP approval selection was not verified.
+- Lee opened the fresh session on the physical Stream Deck+. Deny blocked the
+  real read with `AgentDeck: denied from the connected dashboard.` Allow
+  released a subsequent read about 7.5 seconds after the approval appeared,
+  before the 25-second timeout, and returned the real package data.
+- The repaired loopback endpoint supports the real dashboard TUI. With two
+  real OMP sessions, numeric `1 → 2 → 1` selects distinct session IDs and
+  renders `agentdeck-omp · IDLE`. Twenty rendered-screen samples over 22 seconds
+  remain connected, beyond the TUI's 20-second stale timeout. Reopening the TUI
+  on the already-focused session's port also renders live IDLE.
+  The endpoint uses OMP's current snapshot instead of the daemon's delayed
+  initial disconnected state. The TUI remains a monitor, not an approval widget.
+- After verification, Stream Deck was relaunched without the override.
+  Plugin logs confirm daemon 9120 and 9 buttons with 4 encoders. The installed
+  plugin file matches its original bytes, and service 9120 remains healthy.
+
+These results establish physical Allow and Deny, not full hardware parity.
 
 Remaining boundaries:
 
@@ -83,9 +103,14 @@ Remaining boundaries:
   may omit both. Identical question text does not identify a unique request.
 - The worker route is internal upstream protocol. No upstream source changes
   were necessary for the verified control loop; no upstream PR was opened.
+- Daemon command focus remains global. A session endpoint is a display adapter,
+  not a per-session authorization boundary or isolated control channel.
 
 ## Verification standard
 
 For protocol changes, exercise actual upstream consumer shapes, not only a fake that accepts arbitrary JSON. Prove startup without a daemon, capability rejection, structured prompt rendering, stale question rejection, idle and streaming prompt injection, interrupt, gate resolution, reconnect, and shutdown at the appropriate runtime boundary. Treat registration, rendered controls, and successful device actions as separate acceptance checks.
+
+Run fake-daemon tests and real-daemon smoke sequentially. They share the
+9120–9139 discovery range; concurrent runs can attach real OMP to a test daemon.
 
 Before declaring the integration working, observe a real OMP session in the real AgentDeck dashboard and verify the intended Stream Deck+ controls. Keep automated results and live evidence separate. Service replacement, credential changes, and other destructive operations require Lee's explicit approval.

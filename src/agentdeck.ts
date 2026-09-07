@@ -125,6 +125,13 @@ export interface ClientTarget extends DaemonTarget {
 	sameSocketControl?: boolean | undefined;
 }
 
+/** Resolved loopback route: this session's identity plus its daemon target. */
+export interface SessionRoute {
+	session: ClientSession;
+	target: DaemonTarget;
+	snapshot: () => BridgeEvent[];
+}
+
 
 /**
  * DOM-style socket surface (real `WebSocket`). Handler slots are `unknown`

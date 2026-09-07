@@ -62,8 +62,17 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   “v1 requires the Node daemon”.
 - Register: `session_push_register {sessionId, port, projectName,
   host, remoteAttach:true, weight:0}`. `sessionId` is the stable OMP session ID.
-  `port` belongs to a loopback `/health` server used for reachability probes.
-  The same-socket path does not require an inbound control connection.
+  `port` belongs to a loopback endpoint that serves `/health` and WebSocket
+  upgrades. The TUI reconnects to this port when selecting a session. The
+  endpoint relays its client traffic to the discovered daemon and focuses the
+  selected OMP session. Browser-origin upgrades are rejected. Daemon focus
+  remains global, not per dashboard. The worker control path stays on its
+  existing outbound socket.
+  Daemon `state_update` frames are replaced with the same current OMP snapshot
+  used for worker focus, stamped with the registered session ID and project
+  name. This prevents delayed daemon startup state from replacing OMP state,
+  including reconnect when upstream ignores duplicate focus. Prompt and usage
+  events pass only when their session ID matches. Other frames pass through.
   Registration omits `agentType`: upstream has no `omp` type, and the bridge
   must not impersonate another agent.
 - Ack: expect `session_push_ack`; `isConnected` = open + acked.
@@ -81,8 +90,8 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   capability-less targets under remote intent; hold loop until a valid
   target resolves.
 - Shutdown: resolve any pending gate to native policy, publish `disconnected`,
-  close the socket, and stop the loopback health server. The daemon removes
-  the remote registration when the socket closes.
+  close the worker socket, and stop the loopback endpoint with its relay
+  connections. The daemon removes the registration when the worker closes.
 
 ## 5. OMP binding (`src/extension.ts`)
 
@@ -111,8 +120,12 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   encode/decode, correlation. No OMP imports.
 - `src/extension.ts` — OMP event bindings, `tool_call` gate,
   `sendUserMessage`/`abort` delivery. Depends on the above.
+- `src/session-relay.ts` — loopback health endpoint, TUI WebSocket relay, and
+  session-owned display snapshots.
 - `test/agentdeck.test.ts` — transport behavior (register/ack, state push,
   focus/command routing, stale reject, timeout fallback, reconnect).
+- `test/session-endpoint.test.ts` — advertised-port switching, late daemon
+  snapshots, session metadata isolation, close propagation, and Origin rejection.
 - `scripts/smoke.ts` — fake OMP host and daemon exercise transport behavior.
 - `scripts/live-smoke.mjs` — real installed OMP and a separately running Node
   daemon exercise registration, approval, interruption, and shutdown.
@@ -124,6 +137,9 @@ Run `bun scripts/live-smoke.mjs` against an isolated capable Node daemon on
 port 9139. `AGENTDECK_TEST_PORT` and `OMP_TEST_MODEL` override those defaults.
 This command uses the installed `omp` executable and its model credentials.
 It runs read-only tool scenarios and prints only allow-listed evidence.
+The controller switches to OMP's advertised session endpoint before exercising
+prompt injection, Allow, Deny, and interrupt. A separate registry connection
+observes session removal after the endpoint shuts down.
 
 For real restart recovery, set `AGENTDECK_TEST_RECONNECT=1`. When the script
 prints `WAIT restart isolated daemon`, restart only the disposable test daemon.
