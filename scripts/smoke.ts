@@ -144,6 +144,16 @@ assert(true, "focused tool_call emits prompt_options");
 const promptEvent = promptOptions()[0];
 assert(promptEvent.question.includes("bash"), "approval question names the tool");
 
+sendDown(downCommand({ type: "select_option", index: 1, requestId: promptEvent.requestId }));
+const denied = (await held) as { block?: boolean; reason?: string };
+assert(denied?.block === true && typeof denied?.reason === "string", "deny blocks with a reason");
+
+const allowed = handlers.get("tool_call")?.({ toolName: "read", input: { path: "src/index.ts" } }, ctx);
+await waitFor("second prompt emitted", () => promptOptions().length >= 2);
+const prompt2 = promptOptions().at(-1)!;
+sendDown(downCommand({ type: "select_option", index: 0, requestId: prompt2.requestId }));
+assert((await allowed) === undefined, "allow releases the gate");
+
 // Stale leg: a second gate supersedes the first; the replaced gate falls
 // back to local, and a late answer to it never touches the current gate.
 const staleBase = promptOptions().length;
