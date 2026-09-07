@@ -1,0 +1,16 @@
+{
+  "description": "AgentDeck dashboard integration for oh-my-pi (OMP) coding sessions.",
+  "license": "MIT",
+  "name": "agentdeck-omp",
+  "private": true,
+  "scripts": {
+    "check": "tsc --noEmit",
+    "smoke": "bun scripts/smoke.ts",
+    "test": "bun test"
+  },
+  "type": "module",
+  "version": "0.1.0",
+  "devDependencies": {
+    "typescript": "5"
+  }
+}
