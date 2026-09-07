@@ -18,6 +18,7 @@ import {
 import {
 	deckStateForOmpEvent,
 	promptOptionsForToolCall,
+	type DeckPromptOptions,
 	type DeckSessionState,
 } from "./mapping.js";
 
@@ -25,7 +26,7 @@ import {
 export interface BridgeCtx {
 	abort(): void;
 	isIdle(): boolean;
-	notify(message: string): void;
+	ui: { notify(message: string): void };
 	cwd?: string | undefined;
 	sessionManager?: { getSessionId(): string } | undefined;
 }
@@ -46,6 +47,7 @@ export interface BridgeDeps {
 	gateSchedule?: ((fn: () => void, ms: number) => void) | undefined;
 	gateTimeoutMs?: number | undefined;
 	clientSchedule?: ((fn: () => void, ms: number) => void) | undefined;
+	onShutdown?: (() => void) | undefined;
 }
 
 export interface ToolCallResult {
@@ -83,25 +85,50 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		const timer = setTimeout(fn, ms) as unknown as { unref?: () => void };
 		timer.unref?.();
 	}), deps.gateTimeoutMs ?? 25000);
-	let pending: { requestId: string; question: string; resolve: (result: ToolCallResult | undefined) => void } | null =
-		null;
+	let pending: {
+		requestId: string;
+		tool: string;
+		prompt: DeckPromptOptions;
+		resolve: (result: ToolCallResult | undefined) => void;
+	} | null = null;
+
+	const stateUpdate = (): PluginCommand =>
+		pending === null
+			? { type: "state_update", state: deckState, permissionMode: "default" }
+			: {
+					type: "state_update",
+					state: "awaiting_permission",
+					permissionMode: "default",
+					tool: pending.tool,
+					question: pending.prompt.question,
+					options: pending.prompt.options,
+				};
 
 	const push = (state: DeckSessionState) => {
 		deckState = state;
 		client?.pushState(state);
+		client?.forwardEvent(stateUpdate());
 	};
 
 	const applyCommand = (cmd: PluginCommand) => {
+		if ((cmd.type === "select_option" || cmd.type === "respond") && pending !== null) {
+			// Legacy daemon commands omit correlation echoes. Because this
+			// bridge holds one gate, omission is accepted; any supplied mismatch is not.
+			if (cmd.requestId !== undefined && cmd.requestId !== pending.requestId) return;
+			if (cmd.question !== undefined && cmd.question !== pending.prompt.question) return;
+		}
 		if (cmd.type === "select_option" && typeof cmd.index === "number") {
 			if (!pending) return;
-			const decision = gate.decide(cmd.index, typeof cmd.requestId === "string" ? cmd.requestId : pending.requestId, pending.question);
+			const decision = gate.decide(cmd.index, pending.requestId, pending.prompt.question);
 			if (decision === "allow") {
 				const resolve = pending.resolve;
 				pending = null;
+				push("processing");
 				resolve(undefined);
 			} else if (decision === "deny") {
 				const resolve = pending.resolve;
 				pending = null;
+				push("processing");
 				resolve({ block: true, reason: "AgentDeck: denied from the connected dashboard." });
 			}
 		} else if (cmd.type === "respond" && typeof cmd.value === "string") {
@@ -109,13 +136,22 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			const allow = /^(y|a)/i.test(cmd.value.trim());
 			const resolve = pending.resolve;
 			pending = null;
+			push("processing");
 			resolve(allow ? undefined : { block: true, reason: "AgentDeck: denied from the connected dashboard." });
 		} else if (cmd.type === "send_prompt" && typeof cmd.text === "string") {
 			pi.sendUserMessage(cmd.text);
 		} else if (cmd.type === "interrupt" || cmd.type === "escape") {
+			const resolve = pending?.resolve;
+			pending = null;
+			if (resolve) {
+				push("processing");
+				resolve({
+					block: true,
+					reason: "AgentDeck: interrupted from the connected dashboard.",
+				});
+			}
 			lastCtx?.abort();
 		}
-		// navigate_option / switch_mode: acknowledged no-ops in v1.
 	};
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -125,17 +161,19 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		const input = (call.input ?? {}) as Record<string, unknown>;
 		push(deckStateForOmpEvent("tool_call"));
 		if (!client?.isConnected || !client.isFocused) return undefined;
-		const { question, options } = promptOptionsForToolCall(toolName, input);
+		const prompt = promptOptionsForToolCall(toolName, input);
 		return new Promise<ToolCallResult | undefined>((resolve) => {
-			const { requestId } = gate.open(question, () => {
+			const { requestId } = gate.open(prompt.question, () => {
 				if (pending?.requestId !== requestId) return;
 				pending = null;
+				push("processing");
 				resolve(undefined);
 			});
 			// A replaced gate falls back to local instead of hanging.
 			pending?.resolve(undefined);
-			pending = { requestId, question, resolve };
-			client?.forwardEvent({ type: "prompt_options", question, options, requestId });
+			pending = { requestId, tool: toolName, prompt, resolve };
+			push("awaiting_permission");
+			client?.forwardEvent({ type: "prompt_options", ...prompt, requestId });
 		});
 	});
 
@@ -146,16 +184,20 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		});
 	}
 	pi.on("session_shutdown", () => {
+		const resolve = pending?.resolve;
+		pending = null;
 		push("disconnected");
+		resolve?.(undefined);
 		client?.close();
 		client = null;
+		deps.onShutdown?.();
 	});
 
 	pi.on("session_start", async (event, ctx) => {
 		lastCtx = ctx;
 		const target = await probeDaemons(deps.ports ?? DEFAULT_PORTS, deps.fetchHealth);
 		if (!target) {
-			ctx.notify("AgentDeck: v1 requires the Node daemon (sameSocketControl). Telemetry off.");
+			ctx.ui.notify("AgentDeck: v1 requires the Node daemon (sameSocketControl). Telemetry off.");
 			return;
 		}
 		client = new BridgeClient(
@@ -170,8 +212,8 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			deps.clientSchedule,
 		);
 		client.setReverseControl(applyCommand, () => [
-			{ type: "state_update", state: deckState },
-			...(pending ? [{ type: "prompt_options", question: pending.question, options: ["Allow", "Deny"], requestId: pending.requestId }] : []),
+			stateUpdate(),
+			...(pending ? [{ type: "prompt_options", ...pending.prompt, requestId: pending.requestId }] : []),
 		]);
 		client.setOnConnect(() => {
 			// Re-push the live state: first connect sends idle, a

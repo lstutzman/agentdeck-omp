@@ -7,7 +7,7 @@
  * approvals, so the mapping stays small on purpose.
  */
 
-export type DeckSessionState = "idle" | "processing" | "disconnected";
+export type DeckSessionState = "idle" | "processing" | "awaiting_permission" | "disconnected";
 
 export type OmpLifecycleEvent =
 	| "session_start"
@@ -34,9 +34,15 @@ export function deckStateForOmpEvent(event: OmpLifecycleEvent): DeckSessionState
 	}
 }
 
+export interface DeckPromptOption {
+	index: 0 | 1;
+	label: "Allow" | "Deny";
+}
+
 export interface DeckPromptOptions {
+	promptType: "yes_no";
 	question: string;
-	options: [string, string];
+	options: [DeckPromptOption, DeckPromptOption];
 }
 
 const QUESTION_MAX_CHARS = 280;
@@ -63,9 +69,13 @@ export function promptOptionsForToolCall(
 ): DeckPromptOptions {
 	const question = `Allow ${toolName}? ${summarizeToolInput(toolName, input)}`;
 	return {
+		promptType: "yes_no",
 		question:
 			question.length > QUESTION_MAX_CHARS ? `${question.slice(0, QUESTION_MAX_CHARS - 1)}…` : question,
-		options: ["Allow", "Deny"],
+		options: [
+			{ index: 0, label: "Allow" },
+			{ index: 1, label: "Deny" },
+		],
 	};
 }
 

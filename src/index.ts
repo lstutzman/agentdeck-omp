@@ -10,7 +10,11 @@ import { registerBridge, type BridgePi } from "./extension.js";
 
 declare const Bun:
 	| {
-			serve(options: { port: number; fetch(request: Request): Response | Promise<Response> }): {
+			serve(options: {
+				hostname: string;
+				port: number;
+				fetch(request: Request): Response | Promise<Response>;
+			}): {
 				port: number;
 				stop(): void;
 			};
@@ -33,10 +37,11 @@ async function fetchHealth(port: number) {
 }
 
 /** Loopback `/health` so daemon reachability probes see this session. */
-function openHealthServer(): number {
+function openHealthServer(): { port: number; stop(): void } | null {
 	try {
-		if (typeof Bun === "undefined") return 0;
-		const server = Bun.serve({
+		if (typeof Bun === "undefined") return null;
+		return Bun.serve({
+			hostname: "127.0.0.1",
 			port: 0,
 			fetch(request) {
 				const url = new URL(request.url);
@@ -44,17 +49,18 @@ function openHealthServer(): number {
 				return new Response("Not Found", { status: 404 });
 			},
 		});
-		return server.port;
 	} catch {
-		return 0;
+		return null;
 	}
 }
 
-export default function (pi: BridgePi): void {
-	const bridgePort = openHealthServer();
+export default function (pi: BridgePi): undefined {
+	const healthServer = openHealthServer();
 	registerBridge(pi, {
-		bridgePort,
+		bridgePort: healthServer?.port ?? 0,
 		fetchHealth,
 		createSocket: (target: ClientTarget) => adaptSocket(new WebSocket(`ws://127.0.0.1:${target.port}`)),
+		onShutdown: () => healthServer?.stop(),
 	});
+	return undefined;
 }

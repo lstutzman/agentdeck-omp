@@ -38,6 +38,7 @@ function serveFakeDaemon(preferred?: number): { port: number; stop(closeActiveCo
 		try {
 			const server = Bun.serve({
 				port,
+				...{ hostname: "127.0.0.1" },
 				fetch(request, server) {
 					const url = new URL(request.url);
 					if (url.pathname === "/health") {
@@ -74,7 +75,12 @@ function sendDown(frame: unknown): void {
 	daemonSocket.send(JSON.stringify(frame));
 }
 
-function promptOptions(): { question: string; requestId: string }[] {
+function promptOptions(): {
+	promptType: string;
+	question: string;
+	options: { index: number; label: string }[];
+	requestId: string;
+}[] {
 	return daemonReceived
 		.map((m) => JSON.parse(m.raw))
 		.filter((m) => m.type === "session_event_up" && m.event.type === "prompt_options")
@@ -106,7 +112,7 @@ const ctx = {
 		aborts += 1;
 	},
 	isIdle: () => true,
-	notify: (message: string) => console.log(`smoke notify: ${message}`),
+	ui: { notify: (message: string) => console.log(`smoke notify: ${message}`) },
 	sessionManager: { getSessionId: () => "smoke-1" },
 	cwd: "/Users/smoke/agentdeck-omp",
 };
@@ -142,7 +148,16 @@ const held = handlers.get("tool_call")?.({ toolName: "bash", input: { command: "
 await waitFor("prompt_options emitted", () => promptOptions().length >= 1);
 assert(true, "focused tool_call emits prompt_options");
 const promptEvent = promptOptions()[0];
-assert(promptEvent.question.includes("bash"), "approval question names the tool");
+assert(
+	promptEvent.question.includes("bash") &&
+		promptEvent.promptType === "yes_no" &&
+		JSON.stringify(promptEvent.options) ===
+			JSON.stringify([
+				{ index: 0, label: "Allow" },
+				{ index: 1, label: "Deny" },
+			]),
+	"approval question uses the structured yes/no contract",
+);
 
 sendDown(downCommand({ type: "select_option", index: 1, requestId: promptEvent.requestId }));
 const denied = (await held) as { block?: boolean; reason?: string };

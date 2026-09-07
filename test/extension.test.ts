@@ -15,7 +15,7 @@ function fakePi() {
 		isIdle() {
 			return true;
 		},
-		notify(_message: string) {},
+		ui: { notify(_message: string) {} },
 	};
 	return { pi, ctx };
 }
@@ -66,10 +66,15 @@ describe("registerBridge", () => {
 			state: "idle",
 		});
 	});
-	test("notifies and stays offline without a capable daemon", async () => {
+	test("notifies through ctx.ui and stays offline without a capable daemon", async () => {
 		const { pi, ctx } = fakePi();
-		const notices: string[] = [];
-		const loud: BridgeCtx = { ...ctx, notify: (message: string) => notices.push(message) };
+		const uiNotices: string[] = [];
+		const directNotices: string[] = [];
+		const loud = {
+			...ctx,
+			notify: (message: string) => directNotices.push(message),
+			ui: { notify: (message: string) => uiNotices.push(message) },
+		};
 		let sockets = 0;
 		registerBridge(pi, {
 			sessionId: "omp-123",
@@ -83,7 +88,8 @@ describe("registerBridge", () => {
 		});
 		await pi.handlers.get("session_start")?.({}, loud);
 		expect(sockets).toBe(0);
-		expect(notices.length).toBe(1);
+		expect(uiNotices.length).toBe(1);
+		expect(directNotices).toEqual([]);
 	});
 	test("mirrors lifecycle events to deck states", async () => {
 		const { pi, ctx } = fakePi();
@@ -131,7 +137,11 @@ describe("registerBridge", () => {
 			.map((raw) => JSON.parse(raw))
 			.find((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options");
 		expect(prompt.event.question).toContain("bash");
-		expect(prompt.event.options).toEqual(["Allow", "Deny"]);
+		expect(prompt.event.promptType).toBe("yes_no");
+		expect(prompt.event.options).toEqual([
+			{ index: 0, label: "Allow" },
+			{ index: 1, label: "Deny" },
+		]);
 		socket.onmessage?.(
 			JSON.stringify({
 				type: "session_command_down",
@@ -141,8 +151,102 @@ describe("registerBridge", () => {
 		);
 		expect(await result).toBe(undefined);
 	});
+	test("publishes complete permission snapshots while a gate is held and after resolution", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const result = pi.handlers.get("tool_call")?.(
+			{ toolName: "bash", input: { command: "pwd" } },
+			ctx,
+		);
+		const events = () =>
+			socket.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_event_up")
+				.map((msg) => msg.event);
+		const prompt = events().find((event) => event.type === "prompt_options");
+		expect(events().filter((event) => event.type === "state_update").at(-1)).toEqual({
+			type: "state_update",
+			state: "awaiting_permission",
+			permissionMode: "default",
+			tool: "bash",
+			question: prompt.question,
+			options: prompt.options,
+		});
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: {
+					type: "select_option",
+					index: 0,
+					requestId: prompt.requestId,
+					question: prompt.question,
+				},
+			}),
+		);
+		expect(await result).toBe(undefined);
+		expect(events().filter((event) => event.type === "state_update").at(-1)).toEqual({
+			type: "state_update",
+			state: "processing",
+			permissionMode: "default",
+		});
+	});
+
+
+	test("releases a pending gate to local policy on shutdown", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, ctx);
+		let settled = false;
+		void Promise.resolve(result).then(() => {
+			settled = true;
+		});
+		await pi.handlers.get("session_shutdown")?.({}, ctx);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(settled).toBe(true);
+	});
+	test("runs bridge resource cleanup on shutdown", async () => {
+		const { pi, ctx } = fakePi();
+		let cleanedUp = false;
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [],
+			fetchHealth: async () => null,
+			createSocket: () => fakeSocket(),
+			onShutdown: () => {
+				cleanedUp = true;
+			},
+		});
+		await pi.handlers.get("session_shutdown")?.({}, ctx);
+		expect(cleanedUp).toBe(true);
+	});
 
 	test("deny blocks the tool call with a reason", async () => {
+
 		const { pi, ctx } = fakePi();
 		const socket = fakeSocket();
 		registerBridge(pi, {
@@ -259,6 +363,138 @@ describe("registerBridge", () => {
 			}),
 		);
 		expect(await second).toBe(undefined);
+	});
+
+	test("rejects respond with a mismatched supplied requestId", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, ctx);
+		const prompt = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.find((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options").event;
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "respond", value: "n", requestId: "wrong" },
+			}),
+		);
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "respond", value: "y", requestId: prompt.requestId },
+			}),
+		);
+		expect(await result).toBe(undefined);
+	});
+	test("rejects respond with a mismatched question echo", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, ctx);
+		const prompt = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.find((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options").event;
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: {
+					type: "respond",
+					value: "n",
+					requestId: prompt.requestId,
+					question: "different question",
+				},
+			}),
+		);
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: {
+					type: "respond",
+					value: "y",
+					requestId: prompt.requestId,
+					question: prompt.question,
+				},
+			}),
+		);
+		expect(await result).toBe(undefined);
+	});
+
+
+	test("interrupt blocks and releases a pending tool gate before aborting", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		let aborts = 0;
+		const live: BridgeCtx = {
+			...ctx,
+			abort: () => {
+				aborts += 1;
+			},
+		};
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, live);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, live);
+		let resolution: unknown = "pending";
+		void Promise.resolve(result).then((value) => {
+			resolution = value;
+		});
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "interrupt" },
+			}),
+		);
+		for (let turn = 0; turn < 5 && resolution === "pending"; turn += 1) {
+			await Promise.resolve();
+		}
+		expect(resolution).toEqual({
+			block: true,
+			reason: "AgentDeck: interrupted from the connected dashboard.",
+		});
+		expect(aborts).toBe(1);
+		const state = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.filter((msg) => msg.type === "session_event_up" && msg.event.type === "state_update")
+			.at(-1).event;
+		expect(state).toEqual({
+			type: "state_update",
+			state: "processing",
+			permissionMode: "default",
+		});
 	});
 
 	test("routes prompts and interrupts into the session", async () => {
@@ -391,6 +627,7 @@ describe("registerBridge", () => {
 	test("a stale device answer does not resolve the current gate", async () => {
 		const { pi, ctx } = fakePi();
 		const socket = fakeSocket();
+
 		registerBridge(pi, {
 			sessionId: "omp-123",
 			bridgePort: 9131,
@@ -425,6 +662,50 @@ describe("registerBridge", () => {
 		);
 		expect(await first).toBe(undefined);
 		expect(await second).toBe(undefined);
+	});
+	test("rejects a select_option with a mismatched question echo", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, ctx);
+		const prompt = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.find((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options").event;
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: {
+					type: "select_option",
+					index: 1,
+					requestId: prompt.requestId,
+					question: "different question",
+				},
+			}),
+		);
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: {
+					type: "select_option",
+					index: 0,
+					requestId: prompt.requestId,
+					question: prompt.question,
+				},
+			}),
+		);
+		expect(await result).toBe(undefined);
 	});
 	test("reconnect re-registers and re-pushes the current state", async () => {
 		const { pi, ctx } = fakePi();

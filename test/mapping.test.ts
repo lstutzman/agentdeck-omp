@@ -21,10 +21,14 @@ describe("deckStateForOmpEvent", () => {
 });
 
 describe("promptOptionsForToolCall", () => {
-	test("builds an allow/deny question for a gated tool", () => {
+	test("builds structured yes/no options for a gated tool", () => {
 		const prompt = promptOptionsForToolCall("bash", { command: "rm -rf /tmp/x" });
 		expect(prompt.question).toContain("bash");
-		expect(prompt.options).toEqual(["Allow", "Deny"]);
+		expect(prompt.promptType).toBe("yes_no");
+		expect(prompt.options).toEqual([
+			{ index: 0, label: "Allow" },
+			{ index: 1, label: "Deny" },
+		]);
 	});
 
 	test("summarizes long input without dumping it", () => {

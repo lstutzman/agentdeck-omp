@@ -46,9 +46,10 @@ emitted observability-only; handlers take no result type. They cannot gate.
 - Deny → `{block:true, reason}`.
 - Allow → return `undefined` (release extension gate; OMP native policy stays
   authoritative and may still prompt).
-- Timeout / disconnect / stale → fail closed to local: return `undefined`,
-  never remote-allow. An AgentDeck allow never overrides a stricter OMP
-  policy; a Deck deny always blocks.
+- Timeout and supersession return `undefined`, leaving native OMP policy in
+  charge. This is not fail-closed denial. A stale answer is ignored; the
+  pending gate remains open. Disconnect permits reconnect until the gate expires.
+- Interrupt and escape block a pending gate before calling `ctx.abort()`.
 
 ## 4. Transport shape
 
@@ -59,19 +60,19 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
 - Discovery: probe `127.0.0.1:9120–9139` `/health`. Accept only
   `mode:'daemon'`. Require `sameSocketControl:true`; otherwise refuse with
   “v1 requires the Node daemon”.
-- Register: `session_push_register {sessionId, port, agentType, projectName,
-  host, remoteAttach:true, weight:0}`. `sessionId` = stable OMP session id.
-  `port` = tiny loopback `/health` server this package opens (satisfies
-  reachability probes; daemon never dials back on same-socket path).
-  `agentType` = honest generic (e.g. `monitor`); document the compromise —
-  upstream has no `omp` type and we will not invent one in v1.
+- Register: `session_push_register {sessionId, port, projectName,
+  host, remoteAttach:true, weight:0}`. `sessionId` is the stable OMP session ID.
+  `port` belongs to a loopback `/health` server used for reachability probes.
+  The same-socket path does not require an inbound control connection.
+  Registration omits `agentType`: upstream has no `omp` type, and the bridge
+  must not impersonate another agent.
 - Ack: expect `session_push_ack`; `isConnected` = open + acked.
 - Telemetry: `session_push_state {sessionId, state, modelName?}` on OMP
   lifecycle changes via existing pure `deckStateForOmpEvent`. While focused,
-  also ride `session_event_up {sessionId, event}` for `state_update`,
-  `prompt_options`, `usage_update` only.
-- Focus: on `session_focus_down` set focused, emit snapshot
-  (`state_update` + current `prompt_options` if a gate is open + usage);
+  also send focused `state_update` and `prompt_options` through
+  `session_event_up`. Usage telemetry is not implemented.
+- Focus: on `session_focus_down`, emit a full state snapshot and the current
+  structured approval options if a gate is open;
   on `session_unfocus_down` clear, stop forwarding. Ignore foreign
   `sessionId` frames. Drop `session_event_up` unless on registered sender
   socket (daemon enforces; mirror it client-side).
@@ -79,8 +80,9 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   Re-register from current state; re-emit snapshot if focused. Refuse
   capability-less targets under remote intent; hold loop until a valid
   target resolves.
-- Shutdown: push `disconnected` state, then close (daemon prunes remote
-  registration on socket close).
+- Shutdown: resolve any pending gate to native policy, publish `disconnected`,
+  close the socket, and stop the loopback health server. The daemon removes
+  the remote registration when the socket closes.
 
 ## 5. OMP binding (`src/extension.ts`)
 
@@ -90,17 +92,17 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
 - `send_prompt` command → `pi.sendUserMessage(text)`. Idle starts a turn;
   streaming steers per OMP semantics. One delivery seam (no dual
   `session_stop` + `sendMessage` for the same directive).
-- `interrupt` / `escape` → `ctx.abort()`. Immediate in-process abort.
-  Document honestly: this is stronger than observed-Claude soft STOP.
-- `tool_call` gate: build `promptOptionsForToolCall` (fixed
-  `["Allow","Deny"]`, 280-char cap, input summary only), emit as
-  `prompt_options` while focused, await `select_option`/`respond` correlated
-  by `requestId` + question echo. `decisionFromSelectOption` returns `null`
-  on stale echo or bad index → timeout path. Timeout 25s (under the 60s
-  hook analogy; in-process gate, bounded). `navigate_option` /
-  `switch_mode` acknowledged, no-op in v1 (log).
-- Never invent `permissionMode` unless semantically compatible; send
-  `modelName` when known.
+- `interrupt` and `escape` block and release a pending gate, clear its display,
+  then call `ctx.abort()`.
+- `tool_call` publishes `awaiting_permission` and `prompt_options` with
+  `promptType:"yes_no"` and indexed `{index, label}` Allow/Deny objects.
+  The question is capped at 280 characters and contains only an input summary.
+  Any supplied `requestId` or question echo must match the current gate.
+  Legacy commands may omit both; identical question text cannot distinguish
+  successive requests without a request ID.
+- Timeout is 25 seconds. `navigate_option` and `switch_mode` remain no-ops.
+- Full display snapshots use `permissionMode:"default"`. This describes the
+  bridge display, not OMP's native approval policy. Model telemetry is absent.
 
 ## 6. Files
 
@@ -111,11 +113,23 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   `sendUserMessage`/`abort` delivery. Depends on the above.
 - `test/agentdeck.test.ts` — transport behavior (register/ack, state push,
   focus/command routing, stale reject, timeout fallback, reconnect).
-- `scripts/smoke.ts` — real OMP session: registration, idle/processing,
-  prompt idle + streaming, abort, allow, deny, stale, disconnect, restart.
+- `scripts/smoke.ts` — fake OMP host and daemon exercise transport behavior.
+- `scripts/live-smoke.mjs` — real installed OMP and a separately running Node
+  daemon exercise registration, approval, interruption, and shutdown.
 
 ## 7. Verification
 
-Unit (`bun test`), typecheck (`bunx tsc --noEmit`), then smoke against a
-real OMP session covering §6 list. After implementation: simplify + review
-passes, then atomic commit. No commit until all green.
+Run `bun test && bun run check && bun run smoke`.
+Run `bun scripts/live-smoke.mjs` against an isolated capable Node daemon on
+port 9139. `AGENTDECK_TEST_PORT` and `OMP_TEST_MODEL` override those defaults.
+This command uses the installed `omp` executable and its model credentials.
+It runs read-only tool scenarios and prints only allow-listed evidence.
+
+For real restart recovery, set `AGENTDECK_TEST_RECONNECT=1`. When the script
+prints `WAIT restart isolated daemon`, restart only the disposable test daemon.
+The script checks that the same OMP session and pending approval return.
+Set `AGENTDECK_TEST_STREAMING=1` to also verify queued steering during real
+generation and interrupt the streaming response.
+
+Protocol commands in these checks do not prove physical Stream Deck+ controls.
+Hardware and rendered approval controls remain separate acceptance checks.
