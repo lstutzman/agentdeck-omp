@@ -11,7 +11,7 @@ declare const Bun: {
 			message(ws: { send(data: string): void }, raw: string | Uint8Array | ArrayBuffer): void;
 			close?(ws: unknown): void;
 		};
-	}): { port: number; stop(): void };
+	}): { port: number; stop(closeActiveConnections?: boolean): void };
 };
 
 declare const process: { exit(code: number): never };

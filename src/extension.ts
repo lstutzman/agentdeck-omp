@@ -45,6 +45,7 @@ export interface BridgeDeps {
 	createSocket: (target: ClientTarget) => PushSocketLike;
 	gateSchedule?: ((fn: () => void, ms: number) => void) | undefined;
 	gateTimeoutMs?: number | undefined;
+	clientSchedule?: ((fn: () => void, ms: number) => void) | undefined;
 }
 
 export interface ToolCallResult {
@@ -131,6 +132,8 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 				pending = null;
 				resolve(undefined);
 			});
+			// A replaced gate falls back to local instead of hanging.
+			pending?.resolve(undefined);
 			pending = { requestId, question, resolve };
 			client?.forwardEvent({ type: "prompt_options", question, options, requestId });
 		});
@@ -164,13 +167,16 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			},
 			{ ...target, sameSocketControl: true },
 			deps.createSocket,
+			deps.clientSchedule,
 		);
 		client.setReverseControl(applyCommand, () => [
 			{ type: "state_update", state: deckState },
 			...(pending ? [{ type: "prompt_options", question: pending.question, options: ["Allow", "Deny"], requestId: pending.requestId }] : []),
 		]);
 		client.setOnConnect(() => {
-			push("idle");
+			// Re-push the live state: first connect sends idle, a
+			// reconnect resends whatever the session is doing now.
+			push(deckState);
 		});
 		client.connect();
 	});

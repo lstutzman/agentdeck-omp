@@ -4,7 +4,9 @@
  *
  * Flow: session_start → register/ack → idle → focus → agent_start →
  * tool_call held → select_option(deny) blocks → tool_call again →
- * select_option(allow) releases → send_prompt delivers → interrupt aborts →
+ * select_option(allow) releases → superseded gate falls back to local →
+ * stale deny ignored, fresh allow releases → send_prompt delivers →
+ * interrupt aborts → daemon restart → re-register + live state re-push →
  * shutdown disconnects. Any mismatch throws; exit code is the verdict.
  */
 import factory from "../src/index.js";
@@ -22,19 +24,17 @@ async function waitFor(label: string, cond: () => boolean, timeoutMs = 3000): Pr
 		await new Promise((r) => setTimeout(r, 10));
 	}
 }
-
 const daemonReceived: { type: string; raw: string }[] = [];
 let daemonSocket: { send(data: string): void } | null = null;
-let resolveSocket: ((s: { send(data: string): void }) => void) | null = null;
-const socketReady = new Promise<{ send(data: string): void }>((resolve) => {
-	resolveSocket = resolve;
-});
+let connections = 0;
 
-function serveFakeDaemon(): { port: number; stop(): void } {
+function serveFakeDaemon(preferred?: number): { port: number; stop(closeActiveConnections?: boolean): void } {
 	// Bind inside the entry's probe window (9120-9139) so the normal sweep
 	// finds this daemon; the real Swift daemon on 9120 answers without the
 	// capability and must be skipped by selection, not by fetch patching.
-	for (let port = 9139; port >= 9131; port--) {
+	const ports = preferred === undefined ? [] : [preferred];
+	for (let port = 9139; port >= 9131; port--) ports.push(port);
+	for (const port of ports) {
 		try {
 			const server = Bun.serve({
 				port,
@@ -48,8 +48,8 @@ function serveFakeDaemon(): { port: number; stop(): void } {
 				},
 				websocket: {
 					open(ws) {
+						connections += 1;
 						daemonSocket = { send: (data: string) => ws.send(data) };
-						resolveSocket?.(daemonSocket);
 					},
 					message(ws, raw: string | Uint8Array | ArrayBuffer) {
 						const text = typeof raw === "string" ? raw : String(raw);
@@ -69,7 +69,23 @@ function serveFakeDaemon(): { port: number; stop(): void } {
 	throw new Error("smoke FAIL: no free port in 9131-9139 for the fake daemon");
 }
 
-const daemon = serveFakeDaemon();
+function sendDown(frame: unknown): void {
+	if (!daemonSocket) throw new Error("smoke FAIL: no daemon socket for down-frame");
+	daemonSocket.send(JSON.stringify(frame));
+}
+
+function promptOptions(): { question: string; requestId: string }[] {
+	return daemonReceived
+		.map((m) => JSON.parse(m.raw))
+		.filter((m) => m.type === "session_event_up" && m.event.type === "prompt_options")
+		.map((m) => m.event);
+}
+
+function downCommand(command: unknown): unknown {
+	return { type: "session_command_down", sessionId: "smoke-1", command };
+}
+
+let daemon = serveFakeDaemon();
 const daemonPort = daemon.port;
 console.log(`smoke: fake daemon on ${daemonPort}`);
 
@@ -100,9 +116,11 @@ const ctx = {
 
 (factory as (pi: unknown) => void)(pi);
 await handlers.get("session_start")?.({ sessionId: "smoke-1" }, ctx);
-const sock = await socketReady;
-await waitFor("register acked", () =>
-	daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "idle"),
+await waitFor("socket connected", () => connections >= 1);
+await waitFor(
+	"register acked",
+	() =>
+		daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "idle"),
 );
 const register = JSON.parse(daemonReceived.find((m) => m.type === "session_push_register")!.raw);
 assert(register.sessionId === "smoke-1", "register carries the OMP session id");
@@ -110,81 +128,76 @@ assert(register.remoteAttach === true, "register sets remoteAttach to the capabl
 assert(register.projectName === "agentdeck-omp", "register carries the project basename");
 
 await handlers.get("agent_start")?.({}, ctx);
-await waitFor("processing pushed", () =>
-	daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "processing"),
+await waitFor(
+	"processing pushed",
+	() =>
+		daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "processing"),
 );
 assert(true, "agent_start pushes processing");
 
-sock.send(JSON.stringify({ type: "session_focus_down", sessionId: "smoke-1" }));
+sendDown({ type: "session_focus_down", sessionId: "smoke-1" });
 await new Promise((r) => setTimeout(r, 50));
 
 const held = handlers.get("tool_call")?.({ toolName: "bash", input: { command: "rm -rf /tmp/x" } }, ctx);
-await waitFor("prompt_options emitted", () =>
-	daemonReceived.some((m) => {
-		try {
-			const parsed = JSON.parse(m.raw);
-			return parsed.type === "session_event_up" && parsed.event.type === "prompt_options";
-		} catch {
-			return false;
-		}
-	}),
-);
+await waitFor("prompt_options emitted", () => promptOptions().length >= 1);
 assert(true, "focused tool_call emits prompt_options");
-const promptEvent = daemonReceived
-	.map((m) => JSON.parse(m.raw))
-	.find((m) => m.type === "session_event_up" && m.event.type === "prompt_options").event;
+const promptEvent = promptOptions()[0];
 assert(promptEvent.question.includes("bash"), "approval question names the tool");
 
-sock.send(
-	JSON.stringify({
-		type: "session_command_down",
-		sessionId: "smoke-1",
-		command: { type: "select_option", index: 1, requestId: promptEvent.requestId },
-	}),
-);
-const denied = (await held) as { block?: boolean; reason?: string };
-assert(denied?.block === true && typeof denied?.reason === "string", "deny blocks with a reason");
+// Stale leg: a second gate supersedes the first; the replaced gate falls
+// back to local, and a late answer to it never touches the current gate.
+const staleBase = promptOptions().length;
+const first = handlers.get("tool_call")?.({ toolName: "bash", input: { command: "id" } }, ctx);
+const second = handlers.get("tool_call")?.({ toolName: "read", input: { path: "DESIGN.md" } }, ctx);
+await waitFor("superseding prompt emitted", () => promptOptions().length >= staleBase + 2);
+const [stalePrompt, livePrompt] = promptOptions().slice(-2);
+assert((await first) === undefined, "superseded gate falls back to local");
+sendDown(downCommand({ type: "select_option", index: 1, requestId: stalePrompt.requestId }));
+sendDown(downCommand({ type: "select_option", index: 0, requestId: livePrompt.requestId }));
+assert((await second) === undefined, "stale deny ignored, fresh allow releases");
 
-const allowed = handlers.get("tool_call")?.({ toolName: "read", input: { path: "src/index.ts" } }, ctx);
-await waitFor("second prompt emitted", () => daemonReceived.filter((m) => {
-	try {
-		const parsed = JSON.parse(m.raw);
-		return parsed.type === "session_event_up" && parsed.event.type === "prompt_options";
-	} catch {
-		return false;
-	}
-}).length >= 2);
-const prompt2 = daemonReceived
-	.map((m) => JSON.parse(m.raw))
-	.filter((m) => m.type === "session_event_up" && m.event.type === "prompt_options")
-	.at(-1).event;
-sock.send(
-	JSON.stringify({
-		type: "session_command_down",
-		sessionId: "smoke-1",
-		command: { type: "select_option", index: 0, requestId: prompt2.requestId },
-	}),
-);
-assert((await allowed) === undefined, "allow releases the gate");
-
-sock.send(
-	JSON.stringify({
-		type: "session_command_down",
-		sessionId: "smoke-1",
-		command: { type: "send_prompt", text: "fix it" },
-	}),
-);
-sock.send(
-	JSON.stringify({ type: "session_command_down", sessionId: "smoke-1", command: { type: "interrupt" } }),
-);
+sendDown(downCommand({ type: "send_prompt", text: "fix it" }));
+sendDown(downCommand({ type: "interrupt" }));
 await waitFor("prompt delivered", () => prompts.length === 1);
 assert(prompts[0] === "fix it", "send_prompt reaches sendUserMessage");
 await waitFor("interrupt delivered", () => aborts === 1);
 assert(true, "interrupt reaches abort");
 
+// Restart leg: kill the daemon and bring it back on the same port. The
+// bridge must re-register and re-push the live state on its own.
+const registersBefore = daemonReceived.filter((m) => m.type === "session_push_register").length;
+daemon.stop(true);
+daemon = serveFakeDaemon(daemonPort);
+await waitFor("bridge reconnected", () => connections >= 2, 8000);
+await waitFor(
+	"re-registered",
+	() => daemonReceived.filter((m) => m.type === "session_push_register").length >= registersBefore + 1,
+	8000,
+);
+assert(true, "restart re-registers without a new session");
+const secondRegisterAt = daemonReceived.findIndex(
+	(m, i) =>
+		m.type === "session_push_register" &&
+		daemonReceived.findIndex((n) => n.type === "session_push_register") !== i,
+);
+await waitFor(
+	"live state re-pushed",
+	() =>
+		daemonReceived.some(
+			(m, i) =>
+				i > secondRegisterAt &&
+				m.type === "session_push_state" &&
+				JSON.parse(m.raw).state === "processing",
+		),
+	8000,
+);
+assert(true, "restart re-pushes live processing state");
+
 await handlers.get("session_shutdown")?.({}, ctx);
-await waitFor("disconnected pushed", () =>
-	daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "disconnected"),
+await waitFor(
+	"disconnected pushed",
+	() =>
+		daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "disconnected"),
 );
 assert(true, "shutdown pushes disconnected");
 

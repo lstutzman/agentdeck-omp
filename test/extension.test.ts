@@ -20,7 +20,17 @@ function fakePi() {
 	return { pi, ctx };
 }
 
-function fakeSocket() {
+interface FakeSocket {
+	readyState: number;
+	onopen: (() => void) | null;
+	onclose: (() => void) | null;
+	onmessage: ((data: string) => void) | null;
+	sent: string[];
+	send(data: string): void;
+	close(): void;
+}
+
+function fakeSocket(): FakeSocket {
 	return {
 		readyState: 1,
 		onopen: null as (() => void) | null,
@@ -347,5 +357,104 @@ describe("registerBridge", () => {
 		});
 		await pi.handlers.get("session_start")?.({}, ctx);
 		expect(dialed).toEqual({ host: "127.0.0.1", port: 9121 });
+	});
+	test("a superseded gate resolves to the local flow", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const first = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, ctx);
+		const second = pi.handlers.get("tool_call")?.({ toolName: "read", input: {} }, ctx);
+		// The replaced gate must fall back to local instead of hanging.
+		expect(await first).toBe(undefined);
+		const prompts = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.filter((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options");
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "select_option", index: 0, requestId: prompts.at(-1).event.requestId },
+			}),
+		);
+		expect(await second).toBe(undefined);
+	});
+	test("a stale device answer does not resolve the current gate", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const first = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, ctx);
+		const second = pi.handlers.get("tool_call")?.({ toolName: "read", input: {} }, ctx);
+		const prompts = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.filter((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options");
+		// Stale deny for the replaced gate: ignored, current gate still holds.
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "select_option", index: 1, requestId: prompts[0].event.requestId },
+			}),
+		);
+		// Fresh allow for the current gate: releases it.
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "select_option", index: 0, requestId: prompts.at(-1).event.requestId },
+			}),
+		);
+		expect(await first).toBe(undefined);
+		expect(await second).toBe(undefined);
+	});
+	test("reconnect re-registers and re-pushes the current state", async () => {
+		const { pi, ctx } = fakePi();
+		const created: FakeSocket[] = [];
+		const holder: { fn: (() => void) | null } = { fn: null };
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => {
+				const socket = fakeSocket();
+				created.push(socket);
+				return socket;
+			},
+			clientSchedule: (fn) => {
+				holder.fn = fn;
+			},
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		created[0].onopen?.();
+		created[0].onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		await pi.handlers.get("agent_start")?.({}, ctx);
+		created[0].onclose?.();
+		holder.fn?.();
+		created[1].onopen?.();
+		created[1].onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		const frames = created[1].sent.map((raw) => JSON.parse(raw));
+		expect(frames[0].type).toBe("session_push_register");
+		const states = frames.filter((msg) => msg.type === "session_push_state").map((msg) => msg.state);
+		expect(states.at(-1)).toBe("processing");
 	});
 });
