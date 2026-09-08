@@ -48,8 +48,8 @@ registered on the daily daemon 9120; `sessions_list` showed
 `agentType:"omp"`, `state:"idle"`, `permissionMode:"bypassPermissions"`,
 `projectName:"agentdeck-omp"`.
 
-Sessions started before the symlink existed do not have the extension. Lee is
-restarting his OMP sessions to pick it up.
+Sessions started before the symlink existed do not have the extension. Lee
+restarted his OMP sessions, and the new sessions loaded it.
 
 Measurement note: there is no HTTP `/sessions` route on the daemon. Read the
 registry through a WebSocket `client_register` (`clientType:"companion"`) and
@@ -57,16 +57,16 @@ the `sessions_list` frame. Print allow-listed fields only (`id` prefix,
 `agentType`, `state`, `permissionMode`, `projectName`, `port`); frames carry
 `pairingToken`.
 
-## First action after restart
+## Physical deck verification
 
-Confirm the deck shows the restarted OMP sessions as Session Slot keys. If it
-still shows the placeholder, check (in order): the symlink exists and resolves;
-the session was started after the symlink; the daemon on 9120 is healthy
-(`mode daemon`, `sameSocketControl true`); the registry via `sessions_list`.
+Verified on 2026-09-08: Lee confirmed that the restarted OMP session appears
+as a Session Slot key on the physical Stream Deck. This completes the
+post-restart registration check.
 
-Expected once it works: each OMP session is a key; tapping opens the detail
-view; a `tool_call` in a focused session shows Allow/Deny; `ask` shows the
-option labels; idle shows the `Approved` quick-send key.
+If the deck returns to the placeholder, check that the symlink resolves, the
+session started after the symlink existed, the daemon on 9120 reports
+`mode:"daemon"` and `sameSocketControl:true`, and `sessions_list` contains the
+OMP session.
 
 ## Open decisions Lee has not answered yet
 
