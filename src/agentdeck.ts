@@ -198,6 +198,7 @@ export interface PluginCommand {
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 30000;
+const ACK_TIMEOUT_MS = 10000;
 
 /** Push-channel worker: registers, tracks ack, forwards while focused. */
 export class BridgeClient {
@@ -208,6 +209,7 @@ export class BridgeClient {
 	private applyCommand: ((cmd: PluginCommand) => void) | null = null;
 	private focusSnapshot: (() => BridgeEvent[]) | null = null;
 	private onConnect: (() => void) | null = null;
+	private onAckTimeout: (() => void) | null = null;
 	private reconnectDelay = RECONNECT_BASE_MS;
 
 	constructor(
@@ -236,6 +238,11 @@ export class BridgeClient {
 					buildRegisterFrame({ ...this.session, sameSocketControl: this.target.sameSocketControl }),
 				),
 			);
+			// A daemon that answers /health but dropped the internal worker route
+			// never acks; without this the session looks registered and is silent.
+			this.schedule(() => {
+				if (this.socket === socket && !this.registered) this.onAckTimeout?.();
+			}, ACK_TIMEOUT_MS);
 		};
 		socket.onmessage = (data: string) => {
 			let msg: { type?: unknown; sessionId?: unknown; command?: PluginCommand };
@@ -306,6 +313,11 @@ export class BridgeClient {
 	/** Run `fn` once per connection establishment (first ack). */
 	setOnConnect(fn: () => void): void {
 		this.onConnect = fn;
+	}
+
+	/** Run `fn` when a connection stays unacknowledged past the deadline. */
+	setOnAckTimeout(fn: () => void): void {
+		this.onAckTimeout = fn;
 	}
 
 	/** Forward a relayed event up while focused; all else is dropped. */

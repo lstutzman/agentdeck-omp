@@ -738,4 +738,34 @@ describe("registerBridge", () => {
 		const states = frames.filter((msg) => msg.type === "session_push_state").map((msg) => msg.state);
 		expect(states.at(-1)).toBe("processing");
 	});
+	test("notifies once when the daemon never acknowledges registration", async () => {
+		const { pi, ctx } = fakePi();
+		const uiNotices: string[] = [];
+		const loud = { ...ctx, ui: { notify: (message: string) => uiNotices.push(message) } };
+		const socket = fakeSocket();
+		const timers: (() => void)[] = [];
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+			clientSchedule: (fn) => {
+				timers.push(fn);
+			},
+		});
+		await pi.handlers.get("session_start")?.({}, loud);
+		socket.onopen?.();
+		expect(uiNotices).toEqual([]);
+		for (const fn of timers.splice(0)) fn();
+		expect(uiNotices.length).toBe(1);
+		expect(uiNotices[0]).toContain("acknowledge");
+		await pi.handlers.get("agent_start")?.({}, loud);
+		expect(socket.sent.map((raw) => JSON.parse(raw).type)).toEqual(["session_push_register"]);
+		socket.onclose?.();
+		for (const fn of timers.splice(0)) fn();
+		socket.onopen?.();
+		for (const fn of timers.splice(0)) fn();
+		expect(uiNotices.length).toBe(1);
+	});
 });

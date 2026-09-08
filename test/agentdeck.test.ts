@@ -261,7 +261,7 @@ describe("BridgeClient", () => {
 		expect(client.isConnected).toBe(true);
 		sockets[0].onclose?.();
 		expect(client.isConnected).toBe(false);
-		expect(delays).toEqual([2000]);
+		expect(delays.at(-1)).toBe(2000);
 		pending.fn?.();
 		sockets[1].onopen?.();
 		expect(JSON.parse(sockets[1].sent[0]).type).toBe("session_push_register");

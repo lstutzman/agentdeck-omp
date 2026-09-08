@@ -225,6 +225,12 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			deps.clientSchedule,
 		);
 		client.setReverseControl(applyCommand, snapshot);
+		let warnedUnacked = false;
+		client.setOnAckTimeout(() => {
+			if (warnedUnacked) return;
+			warnedUnacked = true;
+			ctx.ui.notify("AgentDeck: daemon did not acknowledge registration (worker route unsupported?). Telemetry off.");
+		});
 		client.setOnConnect(() => {
 			// Re-push the live state: first connect sends idle, a
 			// reconnect resends whatever the session is doing now.
