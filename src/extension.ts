@@ -67,6 +67,8 @@ export interface BridgeDeps {
 	gateSchedule?: ((fn: () => void, ms: number) => void) | undefined;
 	gateTimeoutMs?: number | undefined;
 	clientSchedule?: ((fn: () => void, ms: number) => void) | undefined;
+	focusNowMs?: (() => number) | undefined;
+	focusTerminal?: (() => Promise<void>) | undefined;
 	onSessionRoute?: ((route: SessionRoute) => void) | undefined;
 	onShutdown?: (() => void) | undefined;
 }
@@ -333,8 +335,22 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			];
 		};
 		deps.onSessionRoute?.({ session, target, snapshot });
-		client = new BridgeClient(session, { ...target, sameSocketControl: true }, deps.createSocket, deps.clientSchedule);
+		client = new BridgeClient(
+			session,
+			{ ...target, sameSocketControl: true },
+			deps.createSocket,
+			deps.clientSchedule,
+			deps.focusNowMs,
+		);
 		client.setReverseControl(applyCommand, snapshot);
+		const focusTerminal = deps.focusTerminal;
+		if (focusTerminal) {
+			client.setOnFocus(() => {
+				void focusTerminal().catch(() => {
+					ctx.ui.notify("AgentDeck: failed to focus the Herdr pane.");
+				});
+			});
+		}
 		let warnedUnacked = false;
 		client.setOnAckTimeout(() => {
 			if (warnedUnacked) return;

@@ -13,12 +13,14 @@ deck, canned prompt keys. Git buttons are out of scope.
 
 ## State at handoff
 
-The current integration baseline reports active ask gates as
-`awaiting_option` on both `session_push_state` and forwarded `state_update`
-frames. Ordinary tool gates remain `awaiting_permission`.
+The integration reports active ask gates as `awaiting_option` on both
+`session_push_state` and forwarded `state_update` frames. Ordinary tool gates
+remain `awaiting_permission`. Deliberate AgentDeck session focus now raises the
+matching Herdr pane; connection and reconnect focus echoes are suppressed.
 
 Latest prior code commits:
 
+- `2fd9cea` Report ask gates as awaiting option.
 - `3b6c572` Share the Allow, Always, and Deny option indexes between prompt
   construction and command settlement.
 - `5cde06e` Add tiered tool gating and session-scoped Always approval.
@@ -26,7 +28,7 @@ Latest prior code commits:
 - `511f377` Document the daily extension install through the
   `~/.omp/agent/extensions` symlink.
 
-Current gate: `bun test` 66 pass, 0 fail, and 176 assertions;
+Current gate: `bun test` 67 pass, 0 fail, and 180 assertions;
 `bun run check` clean; `bun run smoke` PASS. Real smoke on 9120 passed
 registration and switching, read bypass, Deny, Allow, interrupt, ask with
 `awaiting_option`, session-scoped Always, and shutdown.
@@ -76,7 +78,20 @@ The ask-gate state is verified independently on the push-state and focused
 event paths. This matters because AgentDeck uses both channels when projecting
 session state.
 
-## Open decisions Lee has not answered yet
+## Herdr tap-to-focus
+
+When OMP runs under Herdr, a deliberate `session_focus_down` runs
+`herdr agent focus "$HERDR_PANE_ID"`. The callback exists only when
+`HERDR_ENV=1` and `HERDR_PANE_ID` is set. Focus events received during the
+two seconds after each socket open still update AgentDeck state but do not
+raise the terminal, which prevents connection and reconnect echoes from
+stealing focus.
+
+Verified with a deterministic reconnect test, the full fake-daemon gate, the
+daily-daemon smoke on 9120, and the installed Herdr focus command against the
+current pane.
+
+## Open decision Lee has not answered yet
 
 1. **Explain key.** Not addable from this repo. The idle preset row (`GO ON /
    REVIEW / COMMIT / CLEAR`) is hardcoded per agent family upstream
@@ -86,7 +101,6 @@ session state.
    Claude slash commands to OMP); (b) swap the dynamic slot to `Explain`.
    Before wiring either, verify `send_prompt` with `/explain` triggers Lee's
    `/explain` skill in OMP.
-2. **Tap-to-focus default**: on by default under Herdr, or opt-in env flag.
 
 ## Pending work, in priority order
 
@@ -94,14 +108,7 @@ Each item: one RED test at the seams, run it, GREEN, refactor; then
 `bun test && bun run check && bun run smoke`; then the real smoke on 9120;
 then commit and push to `main` (no PR, Lee's decision).
 
-1. **Herdr tap-to-focus.** On `session_focus_down`, run
-   `herdr agent focus "$HERDR_PANE_ID"` when `HERDR_ENV=1` and
-   `HERDR_PANE_ID` is set; suppress the focus_down that arrives within about
-   two seconds of socket open (reconnect echo). Inject a `focusTerminal` dep in
-   `BridgeDeps` for the test. Load `skill://herdr` before any Herdr command.
-   Upstream `focus_session` only sets daemon focus; AgentDeck does not raise
-   the agent window.
-2. **Upstream issue drafts** for `puritysb/AgentDeck` (text for Lee's review,
+1. **Upstream issue drafts** for `puritysb/AgentDeck` (text for Lee's review,
    nothing posted): (1) add `omp` to `AgentType` with accent and glyph
    (`shared/src/adapter.ts:8-17`; unknown types render gray with the OpenClaw
    glyph; a missing type defaults to `claude-code`); (2) accept

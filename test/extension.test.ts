@@ -1010,6 +1010,53 @@ describe("registerBridge", () => {
 		);
 		expect(await result).toBe(undefined);
 	});
+	test("focuses Herdr on deliberate session selection and suppresses reconnect echoes", async () => {
+		const { pi, ctx } = fakePi();
+		const created: FakeSocket[] = [];
+		const holder: { fn: (() => void) | null } = { fn: null };
+		let nowMs = 1000;
+		let focuses = 0;
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => {
+				const socket = fakeSocket();
+				created.push(socket);
+				return socket;
+			},
+			clientSchedule: (fn) => {
+				holder.fn = fn;
+			},
+			focusNowMs: () => nowMs,
+			focusTerminal: async () => {
+				focuses++;
+			},
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		created[0].onopen?.();
+		created[0].onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		created[0].onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		expect(focuses).toBe(0);
+
+		nowMs = 3001;
+		created[0].onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		expect(focuses).toBe(1);
+
+		created[0].onclose?.();
+		holder.fn?.();
+		nowMs = 5000;
+		created[1].onopen?.();
+		created[1].onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		created[1].onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		expect(focuses).toBe(1);
+
+		nowMs = 7001;
+		created[1].onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		expect(focuses).toBe(2);
+	});
+
 	test("reconnect re-registers and re-pushes the current state", async () => {
 		const { pi, ctx } = fakePi();
 		const created: FakeSocket[] = [];

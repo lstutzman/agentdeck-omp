@@ -206,6 +206,7 @@ export interface PluginCommand {
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 30000;
 const ACK_TIMEOUT_MS = 10000;
+const FOCUS_ECHO_WINDOW_MS = 2000;
 
 /** Push-channel worker: registers, tracks ack, forwards while focused. */
 export class BridgeClient {
@@ -215,8 +216,10 @@ export class BridgeClient {
 	private closed = false;
 	private applyCommand: ((cmd: PluginCommand) => void) | null = null;
 	private focusSnapshot: (() => BridgeEvent[]) | null = null;
+	private onFocus: (() => void) | null = null;
 	private onConnect: (() => void) | null = null;
 	private onAckTimeout: (() => void) | null = null;
+	private ignoreFocusUntilMs = 0;
 	private reconnectDelay = RECONNECT_BASE_MS;
 
 	constructor(
@@ -224,6 +227,7 @@ export class BridgeClient {
 		private readonly target: ClientTarget,
 		private readonly createSocket: (target: ClientTarget) => PushSocketLike,
 		private readonly schedule: (fn: () => void, ms: number) => void = setTimeout,
+		private readonly focusNowMs: () => number = Date.now,
 	) {}
 
 	get isConnected(): boolean {
@@ -239,6 +243,7 @@ export class BridgeClient {
 		const socket = this.createSocket(this.target);
 		this.socket = socket;
 		socket.onopen = () => {
+			this.ignoreFocusUntilMs = this.focusNowMs() + FOCUS_ECHO_WINDOW_MS;
 			this.reconnectDelay = RECONNECT_BASE_MS;
 			socket.send(
 				JSON.stringify(buildRegisterFrame({ ...this.session, sameSocketControl: this.target.sameSocketControl })),
@@ -264,6 +269,7 @@ export class BridgeClient {
 				}
 			} else if (msg.type === "session_focus_down") {
 				this.focused = true;
+				if (this.focusNowMs() >= this.ignoreFocusUntilMs) this.onFocus?.();
 				for (const evt of this.focusSnapshot?.() ?? []) this.sendEventUp(evt);
 			} else if (msg.type === "session_unfocus_down") {
 				this.focused = false;
@@ -310,6 +316,11 @@ export class BridgeClient {
 	setReverseControl(applyCommand: (cmd: PluginCommand) => void, focusSnapshot: () => BridgeEvent[]): void {
 		this.applyCommand = applyCommand;
 		this.focusSnapshot = focusSnapshot;
+	}
+
+	/** Run `fn` when a focus frame arrives outside the connection-echo window. */
+	setOnFocus(fn: () => void): void {
+		this.onFocus = fn;
 	}
 
 	/** Run `fn` once per connection establishment (first ack). */

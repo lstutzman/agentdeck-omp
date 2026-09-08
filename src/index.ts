@@ -10,6 +10,13 @@ import { adaptSocket, type ClientTarget, type SessionRoute } from "./agentdeck.j
 import { registerBridge, type BridgePi } from "./extension.js";
 import { openSessionEndpoint } from "./session-relay.js";
 
+declare const Bun: {
+	spawn(
+		command: string[],
+		options: { stdin: "ignore"; stdout: "ignore"; stderr: "ignore" },
+	): { exited: Promise<number> };
+};
+
 async function fetchHealth(port: number) {
 	try {
 		const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) });
@@ -35,6 +42,21 @@ function portWindow(): number[] | undefined {
 	return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
 }
 
+function herdrFocusTerminal(): (() => Promise<void>) | undefined {
+	if (process.env.HERDR_ENV !== "1") return undefined;
+	const paneId = process.env.HERDR_PANE_ID;
+	if (!paneId) return undefined;
+	return async () => {
+		const child = Bun.spawn(["herdr", "agent", "focus", paneId], {
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		const exitCode = await child.exited;
+		if (exitCode !== 0) throw new Error(`herdr agent focus exited with code ${exitCode}`);
+	};
+}
+
 export default function (pi: BridgePi): undefined {
 	// Bound before the worker connects so the advertised port is live by
 	// `session_start`; the route resolves via the lifecycle hook below.
@@ -45,6 +67,7 @@ export default function (pi: BridgePi): undefined {
 		ports: portWindow(),
 		fetchHealth,
 		createSocket: (target: ClientTarget) => adaptSocket(new WebSocket(`ws://127.0.0.1:${target.port}`)),
+		focusTerminal: herdrFocusTerminal(),
 		onSessionRoute: (resolved) => {
 			route = resolved;
 		},
