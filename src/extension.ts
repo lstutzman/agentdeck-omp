@@ -153,23 +153,37 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		client?.forwardEvent({ type: "prompt_options", ...prompt, requestId });
 	};
 
+	/**
+	 * The deck's one quick-send slot (`suggestedPrompt`, rendered only while
+	 * idle). "Approved" is the reply the model asks for most; a press sends it
+	 * as `send_prompt`.
+	 */
+	const IDLE_SUGGESTED_PROMPT = "Approved";
+
 	const stateUpdate = (): PluginCommand => {
 		const modelName = lastCtx?.model?.name;
 		const tagged = {
 			...(modelName === undefined ? {} : { modelName }),
 			...(runningTool === null ? {} : { currentTool: runningTool }),
 		};
-		return pending === null
-			? { type: "state_update", state: deckState, permissionMode, ...tagged }
-			: {
-					type: "state_update",
-					state: "awaiting_permission",
-					permissionMode,
-					question: pending.prompt.question,
-					options: pending.prompt.options,
-					...tagged,
-					currentTool: pending.tool,
-				};
+		if (pending === null) {
+			return {
+				type: "state_update",
+				state: deckState,
+				permissionMode,
+				...tagged,
+				...(deckState === "idle" ? { suggestedPrompt: IDLE_SUGGESTED_PROMPT } : {}),
+			};
+		}
+		return {
+			type: "state_update",
+			state: "awaiting_permission",
+			permissionMode,
+			question: pending.prompt.question,
+			options: pending.prompt.options,
+			...tagged,
+			currentTool: pending.tool,
+		};
 	};
 
 	const push = (state: DeckSessionState) => {

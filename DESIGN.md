@@ -107,6 +107,11 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
 - `send_prompt` command → `pi.sendUserMessage(text)`. Idle starts a turn;
   streaming steers per OMP semantics. One delivery seam (no dual
   `session_stop` + `sendMessage` for the same directive).
+- Idle `state_update` carries `suggestedPrompt:"Approved"`: the deck's one
+  dynamic quick-send key (rendered only while idle; a press sends the text as
+  `send_prompt`). The remaining idle preset row (`GO ON / REVIEW / COMMIT /
+  CLEAR`) is hardcoded in the upstream plugin per agent family; a second
+  custom key such as "Explain" needs an upstream preset row for `omp`.
 - `interrupt` and `escape` block and release a pending gate, clear its display,
   then call `ctx.abort()`.
 - `tool_call` publishes `awaiting_permission` and `prompt_options` with

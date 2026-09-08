@@ -154,6 +154,31 @@ describe("registerBridge", () => {
 			permissionMode: "bypassPermissions",
 		});
 	});
+	test("offers Approved as the quick-send prompt only while idle", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const updates = () =>
+			socket.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_event_up" && msg.event.type === "state_update")
+				.map((msg) => msg.event);
+		expect(updates().at(-1).suggestedPrompt).toBe("Approved");
+		await pi.handlers.get("agent_start")?.({}, ctx);
+		expect(updates().at(-1).suggestedPrompt).toBe(undefined);
+		await pi.handlers.get("agent_end")?.({}, ctx);
+		expect(updates().at(-1).suggestedPrompt).toBe("Approved");
+	});
 	test("reports bypassPermissions until OMP asks for approval, then the reported mode", async () => {
 		const { pi, ctx } = fakePi();
 		const socket = fakeSocket();

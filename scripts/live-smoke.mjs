@@ -97,6 +97,9 @@ try {
 		() => deck.slice(switchedAt).some((x) => x.type === "state_update" && x.sessionId === sessionId),
 		"switched session snapshot",
 	);
+	const idleSnapshot = deck.slice(switchedAt).find((x) => x.type === "state_update" && x.sessionId === sessionId);
+	assert.equal(idleSnapshot.state, "idle");
+	assert.equal(idleSnapshot.suggestedPrompt, "Approved", "idle quick-send prompt");
 	const send = (command) => socket.send(JSON.stringify({ ...command, sessionId }));
 	console.log("PASS real OMP registration and advertised endpoint session switching");
 	for (const [index, expectedError] of [
