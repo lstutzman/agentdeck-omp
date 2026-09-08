@@ -13,10 +13,11 @@ deck, canned prompt keys. Git buttons are out of scope.
 
 ## State at handoff
 
-Before this documentation update, `main` == `origin/main` at `3b6c572` and
-the working tree was clean.
+The current integration baseline reports active ask gates as
+`awaiting_option` on both `session_push_state` and forwarded `state_update`
+frames. Ordinary tool gates remain `awaiting_permission`.
 
-Latest code commits:
+Latest prior code commits:
 
 - `3b6c572` Share the Allow, Always, and Deny option indexes between prompt
   construction and command settlement.
@@ -25,10 +26,10 @@ Latest code commits:
 - `511f377` Document the daily extension install through the
   `~/.omp/agent/extensions` symlink.
 
-Gate at `3b6c572`: `bun test` 66 pass, 0 fail, and 175 assertions;
-`bun run check` clean; `bun run smoke` PASS. Real smoke on 9120 at `5cde06e`
-passed registration and switching, read bypass, Deny, Allow, interrupt, ask,
-session-scoped Always, and shutdown.
+Current gate: `bun test` 66 pass, 0 fail, and 176 assertions;
+`bun run check` clean; `bun run smoke` PASS. Real smoke on 9120 passed
+registration and switching, read bypass, Deny, Allow, interrupt, ask with
+`awaiting_option`, session-scoped Always, and shutdown.
 
 ### The daily install (this session's real finding)
 
@@ -71,6 +72,10 @@ session started after the symlink existed, the daemon on 9120 reports
 `mode:"daemon"` and `sameSocketControl:true`, and `sessions_list` contains the
 OMP session.
 
+The ask-gate state is verified independently on the push-state and focused
+event paths. This matters because AgentDeck uses both channels when projecting
+session state.
+
 ## Open decisions Lee has not answered yet
 
 1. **Explain key.** Not addable from this repo. The idle preset row (`GO ON /
@@ -89,19 +94,14 @@ Each item: one RED test at the seams, run it, GREEN, refactor; then
 `bun test && bun run check && bun run smoke`; then the real smoke on 9120;
 then commit and push to `main` (no PR, Lee's decision).
 
-1. **`awaiting_option` for the ask gate** instead of `awaiting_permission`
-   (deck `State` enum: `disconnected | idle | processing |
-   awaiting_permission | awaiting_option | awaiting_diff`,
-   `shared/src/states.ts`). Change `stateUpdate()` when `pending.ask` is set;
-   update tests and the `live-smoke.mjs` assertion near the ask scenario.
-2. **Herdr tap-to-focus.** On `session_focus_down`, run
+1. **Herdr tap-to-focus.** On `session_focus_down`, run
    `herdr agent focus "$HERDR_PANE_ID"` when `HERDR_ENV=1` and
    `HERDR_PANE_ID` is set; suppress the focus_down that arrives within about
    two seconds of socket open (reconnect echo). Inject a `focusTerminal` dep in
    `BridgeDeps` for the test. Load `skill://herdr` before any Herdr command.
    Upstream `focus_session` only sets daemon focus; AgentDeck does not raise
    the agent window.
-3. **Upstream issue drafts** for `puritysb/AgentDeck` (text for Lee's review,
+2. **Upstream issue drafts** for `puritysb/AgentDeck` (text for Lee's review,
    nothing posted): (1) add `omp` to `AgentType` with accent and glyph
    (`shared/src/adapter.ts:8-17`; unknown types render gray with the OpenClaw
    glyph; a missing type defaults to `claude-code`); (2) accept

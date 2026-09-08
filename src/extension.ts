@@ -152,7 +152,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		// A replaced gate falls back to local instead of hanging.
 		pending?.resolve(undefined);
 		pending = { requestId, tool: toolName, prompt, resolve, ask };
-		push("awaiting_permission");
+		push(ask === undefined ? "awaiting_permission" : "awaiting_option");
 		client?.forwardEvent({ type: "prompt_options", ...prompt, requestId });
 	};
 
@@ -180,7 +180,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		}
 		return {
 			type: "state_update",
-			state: "awaiting_permission",
+			state: deckState,
 			permissionMode,
 			question: pending.prompt.question,
 			options: pending.prompt.options,

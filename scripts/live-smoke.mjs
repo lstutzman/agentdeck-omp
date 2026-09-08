@@ -243,7 +243,7 @@ try {
 		assert(
 			deck
 				.slice(askStart)
-				.some((x) => x.type === "state_update" && x.state === "awaiting_permission" && x.currentTool === "ask"),
+				.some((x) => x.type === "state_update" && x.state === "awaiting_option" && x.currentTool === "ask"),
 		);
 		send({ type: "select_option", index: 1, question: ask.question });
 		await until(() => rpc.slice(rpcStart).some((x) => x.type === "tool_execution_end"), "ask answered");

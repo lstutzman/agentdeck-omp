@@ -382,10 +382,16 @@ describe("registerBridge", () => {
 			{ index: 1, label: "Postgres" },
 		]);
 		expect(
+			socket.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_push_state")
+				.at(-1).state,
+		).toBe("awaiting_option");
+		expect(
 			events()
 				.filter((event) => event.type === "state_update")
 				.at(-1).state,
-		).toBe("awaiting_permission");
+		).toBe("awaiting_option");
 		socket.onmessage?.(
 			JSON.stringify({
 				type: "session_command_down",

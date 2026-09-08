@@ -7,7 +7,7 @@
  * approvals, so the mapping stays small on purpose.
  */
 
-export type DeckSessionState = "idle" | "processing" | "awaiting_permission" | "disconnected";
+export type DeckSessionState = "idle" | "processing" | "awaiting_permission" | "awaiting_option" | "disconnected";
 
 export type OmpLifecycleEvent =
 	| "session_start"
