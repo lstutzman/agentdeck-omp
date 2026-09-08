@@ -115,13 +115,24 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   Any supplied `requestId` or question echo must match the current gate.
   Legacy commands may omit both; identical question text cannot distinguish
   successive requests without a request ID.
+- An `ask` tool call is held as an ask-gate instead: each question becomes a
+  `multi_select` prompt whose options are the ask's own labels, one question
+  at a time with a fresh `requestId` each. The final pick blocks the call with
+  a reason that lists every answer, which is how the model receives it — OMP's
+  `ToolCallEventResult` cannot substitute a tool result, and this mirrors the
+  upstream ask-gate for Claude Code. `respond` is ignored while an ask is
+  held. An unanswered hold times out to local handling, so OMP's own picker
+  appears after the hold. "Other (type your own)" is not reachable from the
+  deck. OMP creates `ask` only when a UI exists (`rpc-ui`, not `rpc`).
 - Timeout is 25 seconds. `navigate_option` and `switch_mode` remain no-ops:
   OMP 18.1.11 exposes no extension API to change its approval mode or drive
   its native prompts (`ApprovalMode` is observe-only; `ctx.ui` presents
   dialogs but cannot navigate OMP's own).
-- Full display snapshots use `permissionMode:"default"`. This describes the
-  bridge display, not OMP's native approval policy; OMP exposes no
-  approval-mode getter to extensions.
+- Snapshots report `permissionMode` from OMP's `ApprovalMode`: `yolo` →
+  `bypassPermissions` (the default, since OMP has no approval-mode getter),
+  `write` → `acceptEdits`, `always-ask` → `default`, updated from
+  `tool_approval_requested`. Registration sends `agentType:"omp"` so the deck
+  never falls back to the Claude badge.
 - `currentTool` is the tool named by the latest `tool_call` until
   `tool_result` or `agent_end`. While a gate is held it is the gated tool; a
   Deny or interrupt clears it because the call never runs, an Allow keeps it

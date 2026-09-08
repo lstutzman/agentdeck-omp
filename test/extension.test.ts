@@ -64,6 +64,7 @@ describe("registerBridge", () => {
 			type: "session_push_state",
 			sessionId: "omp-123",
 			state: "idle",
+			permissionMode: "bypassPermissions",
 		});
 	});
 	test("notifies through ctx.ui and stays offline without a capable daemon", async () => {
@@ -106,7 +107,11 @@ describe("registerBridge", () => {
 		await pi.handlers.get("session_start")?.({}, ctx);
 		tracked.onopen?.();
 		tracked.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
-		const states = () => tracked.sent.map((raw) => JSON.parse(raw)).filter((msg) => msg.type === "session_push_state").map((msg) => msg.state);
+		const states = () =>
+			tracked.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_push_state")
+				.map((msg) => msg.state);
 		await pi.handlers.get("agent_start")?.({}, ctx);
 		await pi.handlers.get("tool_call")?.({ toolName: "bash" }, ctx);
 		await pi.handlers.get("agent_end")?.({}, ctx);
@@ -136,8 +141,47 @@ describe("registerBridge", () => {
 				.map((raw) => JSON.parse(raw))
 				.filter((msg) => msg.type === "session_event_up" && msg.event.type === "state_update")
 				.map((msg) => msg.event);
-		expect(updates().at(-1)).toEqual({ type: "state_update", state: "processing", permissionMode: "default", currentTool: "bash" });
+		expect(updates().at(-1)).toEqual({
+			type: "state_update",
+			state: "processing",
+			permissionMode: "bypassPermissions",
+			currentTool: "bash",
+		});
 		await pi.handlers.get("tool_result")?.({ toolName: "bash" }, ctx);
+		expect(updates().at(-1)).toEqual({
+			type: "state_update",
+			state: "processing",
+			permissionMode: "bypassPermissions",
+		});
+	});
+	test("reports bypassPermissions until OMP asks for approval, then the reported mode", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const frames = () => socket.sent.map((raw) => JSON.parse(raw));
+		const pushed = () =>
+			frames()
+				.filter((msg) => msg.type === "session_push_state")
+				.at(-1);
+		const updates = () =>
+			frames()
+				.filter((msg) => msg.type === "session_event_up" && msg.event.type === "state_update")
+				.map((msg) => msg.event);
+		expect(pushed().permissionMode).toBe("bypassPermissions");
+		expect(updates().at(-1).permissionMode).toBe("bypassPermissions");
+		await pi.handlers.get("tool_approval_requested")?.({ toolName: "bash", approvalMode: "always-ask" }, ctx);
+		await pi.handlers.get("agent_start")?.({}, ctx);
+		expect(pushed().permissionMode).toBe("default");
 		expect(updates().at(-1)).toEqual({ type: "state_update", state: "processing", permissionMode: "default" });
 	});
 	test("holds a focused tool call for device approval, allow releases", async () => {
@@ -154,10 +198,7 @@ describe("registerBridge", () => {
 		socket.onopen?.();
 		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
 		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
-		const result = pi.handlers.get("tool_call")?.(
-			{ toolName: "bash", input: { command: "rm -rf /tmp/x" } },
-			ctx,
-		);
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "rm -rf /tmp/x" } }, ctx);
 		const prompt = socket.sent
 			.map((raw) => JSON.parse(raw))
 			.find((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options");
@@ -176,7 +217,7 @@ describe("registerBridge", () => {
 		);
 		expect(await result).toBe(undefined);
 	});
-	test("publishes complete permission snapshots while a gate is held and after resolution", async () => {
+	test("answers a focused ask call from the deck through the block reason", async () => {
 		const { pi, ctx } = fakePi();
 		const socket = fakeSocket();
 		registerBridge(pi, {
@@ -191,7 +232,12 @@ describe("registerBridge", () => {
 		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
 		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
 		const result = pi.handlers.get("tool_call")?.(
-			{ toolName: "bash", input: { command: "pwd" } },
+			{
+				toolName: "ask",
+				input: {
+					questions: [{ id: "db", question: "Which store?", options: [{ label: "SQLite" }, { label: "Postgres" }] }],
+				},
+			},
 			ctx,
 		);
 		const events = () =>
@@ -200,10 +246,115 @@ describe("registerBridge", () => {
 				.filter((msg) => msg.type === "session_event_up")
 				.map((msg) => msg.event);
 		const prompt = events().find((event) => event.type === "prompt_options");
-		expect(events().filter((event) => event.type === "state_update").at(-1)).toEqual({
+		expect(prompt.promptType).toBe("multi_select");
+		expect(prompt.question).toBe("Which store?");
+		expect(prompt.options).toEqual([
+			{ index: 0, label: "SQLite" },
+			{ index: 1, label: "Postgres" },
+		]);
+		expect(
+			events()
+				.filter((event) => event.type === "state_update")
+				.at(-1).state,
+		).toBe("awaiting_permission");
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "select_option", index: 1, requestId: prompt.requestId, question: "Which store?" },
+			}),
+		);
+		const answer = (await result) as { block?: boolean; reason?: string };
+		expect(answer.block).toBe(true);
+		expect(answer.reason).toContain("Postgres");
+		expect(
+			events()
+				.filter((event) => event.type === "state_update")
+				.at(-1),
+		).toEqual({
+			type: "state_update",
+			state: "processing",
+			permissionMode: "bypassPermissions",
+		});
+	});
+	test("holds a multi-question ask one question at a time and reports every answer", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const result = pi.handlers.get("tool_call")?.(
+			{
+				toolName: "ask",
+				input: {
+					questions: [
+						{ id: "db", question: "Which store?", options: [{ label: "SQLite" }, { label: "Postgres" }] },
+						{ id: "auth", question: "Which auth?", options: [{ label: "JWT" }, { label: "Cookies" }] },
+					],
+				},
+			},
+			ctx,
+		);
+		const prompts = () =>
+			socket.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options")
+				.map((msg) => msg.event);
+		const answer = (prompt: { requestId: string; question: string }, index: number) =>
+			socket.onmessage?.(
+				JSON.stringify({
+					type: "session_command_down",
+					sessionId: "omp-123",
+					command: { type: "select_option", index, requestId: prompt.requestId, question: prompt.question },
+				}),
+			);
+		answer(prompts()[0], 0);
+		expect(prompts().length).toBe(2);
+		expect(prompts()[1].question).toBe("Which auth?");
+		expect(prompts()[1].requestId).not.toBe(prompts()[0].requestId);
+		answer(prompts()[1], 1);
+		const outcome = (await result) as { block?: boolean; reason?: string };
+		expect(outcome.block).toBe(true);
+		expect(outcome.reason).toContain("SQLite");
+		expect(outcome.reason).toContain("Cookies");
+	});
+	test("publishes complete permission snapshots while a gate is held and after resolution", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx);
+		const events = () =>
+			socket.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_event_up")
+				.map((msg) => msg.event);
+		const prompt = events().find((event) => event.type === "prompt_options");
+		expect(
+			events()
+				.filter((event) => event.type === "state_update")
+				.at(-1),
+		).toEqual({
 			type: "state_update",
 			state: "awaiting_permission",
-			permissionMode: "default",
+			permissionMode: "bypassPermissions",
 			currentTool: "bash",
 			question: prompt.question,
 			options: prompt.options,
@@ -221,14 +372,17 @@ describe("registerBridge", () => {
 			}),
 		);
 		expect(await result).toBe(undefined);
-		expect(events().filter((event) => event.type === "state_update").at(-1)).toEqual({
+		expect(
+			events()
+				.filter((event) => event.type === "state_update")
+				.at(-1),
+		).toEqual({
 			type: "state_update",
 			state: "processing",
-			permissionMode: "default",
+			permissionMode: "bypassPermissions",
 			currentTool: "bash",
 		});
 	});
-
 
 	test("releases a pending gate to local policy on shutdown", async () => {
 		const { pi, ctx } = fakePi();
@@ -272,7 +426,6 @@ describe("registerBridge", () => {
 	});
 
 	test("deny blocks the tool call with a reason", async () => {
-
 		const { pi, ctx } = fakePi();
 		const socket = fakeSocket();
 		registerBridge(pi, {
@@ -286,10 +439,7 @@ describe("registerBridge", () => {
 		socket.onopen?.();
 		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
 		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
-		const result = pi.handlers.get("tool_call")?.(
-			{ toolName: "bash", input: { command: "rm -rf /tmp/x" } },
-			ctx,
-		);
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "rm -rf /tmp/x" } }, ctx);
 		const prompt = socket.sent
 			.map((raw) => JSON.parse(raw))
 			.find((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options");
@@ -318,10 +468,7 @@ describe("registerBridge", () => {
 		await pi.handlers.get("session_start")?.({}, ctx);
 		socket.onopen?.();
 		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
-		const result = await pi.handlers.get("tool_call")?.(
-			{ toolName: "bash", input: { command: "ls" } },
-			ctx,
-		);
+		const result = await pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "ls" } }, ctx);
 		expect(result).toBe(undefined);
 		const prompts = socket.sent
 			.map((raw) => JSON.parse(raw))
@@ -348,10 +495,7 @@ describe("registerBridge", () => {
 		socket.onopen?.();
 		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
 		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
-		const result = pi.handlers.get("tool_call")?.(
-			{ toolName: "bash", input: { command: "ls" } },
-			ctx,
-		);
+		const result = pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "ls" } }, ctx);
 		pending.fn?.();
 		expect(await result).toBe(undefined);
 	});
@@ -470,7 +614,6 @@ describe("registerBridge", () => {
 		expect(await result).toBe(undefined);
 	});
 
-
 	test("interrupt blocks and releases a pending tool gate before aborting", async () => {
 		const { pi, ctx } = fakePi();
 		const socket = fakeSocket();
@@ -519,7 +662,7 @@ describe("registerBridge", () => {
 		expect(state).toEqual({
 			type: "state_update",
 			state: "processing",
-			permissionMode: "default",
+			permissionMode: "bypassPermissions",
 		});
 	});
 
@@ -610,8 +753,7 @@ describe("registerBridge", () => {
 		registerBridge(pi, {
 			bridgePort: 9131,
 			ports: [9120, 9121],
-			fetchHealth: async (port) =>
-				port === 9121 ? { port, mode: "daemon", sameSocketControl: true } : null,
+			fetchHealth: async (port) => (port === 9121 ? { port, mode: "daemon", sameSocketControl: true } : null),
 			createSocket: (target) => {
 				dialed = { host: target.host, port: target.port };
 				return socket;

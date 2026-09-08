@@ -8,7 +8,7 @@
  * (Node daemon); a capability-less daemon (Swift) gets a plain local-style
  * registration.
  */
-import { decisionFromSelectOption, type DeckDecision } from "./mapping.js";
+import type { DeckDecision } from "./mapping.js";
 
 export interface RegisterArgs {
 	sessionId: string;
@@ -19,10 +19,18 @@ export interface RegisterArgs {
 	sameSocketControl?: boolean | undefined;
 }
 
+/**
+ * Not an upstream `AgentType` member: the daemon stores the string verbatim
+ * and the deck renders unknown agents with the neutral accent. Omitting it
+ * is worse — the slot renderer defaults a missing type to `claude-code`.
+ */
+export const OMP_AGENT_TYPE = "omp";
+
 export interface SessionPushRegister {
 	type: "session_push_register";
 	sessionId: string;
 	port: number;
+	agentType: typeof OMP_AGENT_TYPE;
 	projectName?: string | undefined;
 	host?: string | undefined;
 	remoteAttach?: boolean | undefined;
@@ -35,16 +43,17 @@ export function buildRegisterFrame(args: RegisterArgs): SessionPushRegister {
 		type: "session_push_register",
 		sessionId: args.sessionId,
 		port: args.port,
+		agentType: OMP_AGENT_TYPE,
 		projectName: args.projectName,
 		host: args.host,
 		remoteAttach: args.sameSocketControl === true ? true : undefined,
 		weight: args.weight ?? 0,
 	};
 }
-
 export interface PushStateArgs {
 	sessionId: string;
 	state: string;
+	permissionMode: string;
 	modelName?: string | undefined;
 }
 
@@ -52,19 +61,19 @@ export interface SessionPushState {
 	type: "session_push_state";
 	sessionId: string;
 	state: string;
+	permissionMode: string;
 	modelName?: string | undefined;
 }
 
 /** Build the `session_push_state` frame. Omits `modelName` when unknown. */
 export function buildPushState(args: PushStateArgs): SessionPushState {
-	return args.modelName === undefined
-		? { type: "session_push_state", sessionId: args.sessionId, state: args.state }
-		: {
-				type: "session_push_state",
-				sessionId: args.sessionId,
-				state: args.state,
-				modelName: args.modelName,
-			};
+	const base = {
+		type: "session_push_state" as const,
+		sessionId: args.sessionId,
+		state: args.state,
+		permissionMode: args.permissionMode,
+	};
+	return args.modelName === undefined ? base : { ...base, modelName: args.modelName };
 }
 
 export interface DaemonHealth {
@@ -91,7 +100,6 @@ export function selectDaemonTarget(candidates: DaemonHealth[]): DaemonTarget | n
 	}
 	return null;
 }
-
 
 /**
  * Sweep candidate ports for a capable daemon. `fetchHealth` returns the
@@ -131,7 +139,6 @@ export interface SessionRoute {
 	target: DaemonTarget;
 	snapshot: () => BridgeEvent[];
 }
-
 
 /**
  * DOM-style socket surface (real `WebSocket`). Handler slots are `unknown`
@@ -234,9 +241,7 @@ export class BridgeClient {
 		socket.onopen = () => {
 			this.reconnectDelay = RECONNECT_BASE_MS;
 			socket.send(
-				JSON.stringify(
-					buildRegisterFrame({ ...this.session, sameSocketControl: this.target.sameSocketControl }),
-				),
+				JSON.stringify(buildRegisterFrame({ ...this.session, sameSocketControl: this.target.sameSocketControl })),
 			);
 			// A daemon that answers /health but dropped the internal worker route
 			// never acks; without this the session looks registered and is silent.
@@ -290,10 +295,10 @@ export class BridgeClient {
 	}
 
 	/** Push a state update; dropped unless the socket is open and acked. */
-	pushState(state: string, modelName?: string | undefined): void {
+	pushState(state: string, permissionMode: string, modelName?: string | undefined): void {
 		if (!this.isConnected) return;
 		this.socket?.send(
-			JSON.stringify(buildPushState({ sessionId: this.session.sessionId, state, modelName })),
+			JSON.stringify(buildPushState({ sessionId: this.session.sessionId, state, permissionMode, modelName })),
 		);
 	}
 
@@ -302,10 +307,7 @@ export class BridgeClient {
 	 * commands into the OMP binding; `focusSnapshot` yields the events to
 	 * emit up when the daemon focuses this session.
 	 */
-	setReverseControl(
-		applyCommand: (cmd: PluginCommand) => void,
-		focusSnapshot: () => BridgeEvent[],
-	): void {
+	setReverseControl(applyCommand: (cmd: PluginCommand) => void, focusSnapshot: () => BridgeEvent[]): void {
 		this.applyCommand = applyCommand;
 		this.focusSnapshot = focusSnapshot;
 	}
@@ -363,11 +365,21 @@ export class ApprovalGate {
 		return { requestId };
 	}
 
-	decide(index: number, requestId: string, askedQuestion: string): DeckDecision | null {
+	/**
+	 * Accept a deck option for the open request. Null when the answer must not
+	 * apply: stale request id, changed question, or an index outside the
+	 * option list. A returned index closes the request.
+	 */
+	answer(index: number, requestId: string, askedQuestion: string, optionCount: number): number | null {
 		const current = this.openRequest;
-		if (!current || current.requestId !== requestId) return null;
-		const decision = decisionFromSelectOption(index, askedQuestion, current.question);
-		if (decision !== null) this.openRequest = null;
-		return decision;
+		if (!current || current.requestId !== requestId || current.question !== askedQuestion) return null;
+		if (!Number.isInteger(index) || index < 0 || index >= optionCount) return null;
+		this.openRequest = null;
+		return index;
+	}
+
+	decide(index: number, requestId: string, askedQuestion: string): DeckDecision | null {
+		const chosen = this.answer(index, requestId, askedQuestion, 2);
+		return chosen === null ? null : chosen === 0 ? "allow" : "deny";
 	}
 }

@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { adaptSocket, ApprovalGate, BridgeClient, buildPushState, buildRegisterFrame, probeDaemons, selectDaemonTarget } from "../src/agentdeck.js";
+import {
+	adaptSocket,
+	ApprovalGate,
+	BridgeClient,
+	buildPushState,
+	buildRegisterFrame,
+	probeDaemons,
+	selectDaemonTarget,
+} from "../src/agentdeck.js";
 
 describe("buildRegisterFrame", () => {
 	test("sets remoteAttach only when daemon advertises same-socket control", () => {
@@ -10,23 +18,28 @@ describe("buildRegisterFrame", () => {
 			host: "mbp",
 			weight: 0,
 		};
-		expect(
-			buildRegisterFrame({ ...base, sameSocketControl: true }).remoteAttach,
-		).toBe(true);
-		expect(
-			buildRegisterFrame({ ...base, sameSocketControl: false }).remoteAttach,
-		).toBe(undefined);
+		expect(buildRegisterFrame({ ...base, sameSocketControl: true }).remoteAttach).toBe(true);
+		expect(buildRegisterFrame({ ...base, sameSocketControl: false }).remoteAttach).toBe(undefined);
+	});
+	test("identifies the session as omp so the deck never badges it as Claude", () => {
+		expect(buildRegisterFrame({ sessionId: "omp-123", port: 9131 }).agentType).toBe("omp");
 	});
 });
 
 describe("buildPushState", () => {
 	test("emits session id, state, and model when known", () => {
 		expect(
-			buildPushState({ sessionId: "omp-123", state: "processing", modelName: "opus" }),
+			buildPushState({
+				sessionId: "omp-123",
+				state: "processing",
+				permissionMode: "bypassPermissions",
+				modelName: "opus",
+			}),
 		).toEqual({
 			type: "session_push_state",
 			sessionId: "omp-123",
 			state: "processing",
+			permissionMode: "bypassPermissions",
 			modelName: "opus",
 		});
 	});
@@ -73,6 +86,7 @@ describe("BridgeClient", () => {
 			type: "session_push_register",
 			sessionId: "omp-123",
 			port: 9131,
+			agentType: "omp",
 			projectName: "agentdeck-omp",
 			weight: 0,
 			remoteAttach: true,
@@ -98,199 +112,200 @@ describe("BridgeClient", () => {
 			() => socket,
 		);
 		client.connect();
-		client.pushState("processing");
+		client.pushState("processing", "bypassPermissions");
 		expect(sent.length).toBe(0);
 		socket.onopen?.();
 		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
-		client.pushState("processing", "opus");
+		client.pushState("processing", "bypassPermissions", "opus");
 		expect(JSON.parse(sent[1])).toEqual({
 			type: "session_push_state",
 			sessionId: "omp-123",
 			state: "processing",
+			permissionMode: "bypassPermissions",
 			modelName: "opus",
 		});
 		socket.onclose?.();
-		client.pushState("idle");
+		client.pushState("idle", "bypassPermissions");
 		expect(sent.length).toBe(2);
-});
+	});
 });
 
-	test("forwards relayed events only while focused", () => {
-		const sent: string[] = [];
-		const socket = {
-			readyState: 1,
-			onopen: null as (() => void) | null,
-			onclose: null as (() => void) | null,
-			onmessage: null as ((data: string) => void) | null,
-			send(data: string) {
-				sent.push(data);
-			},
-			close() {},
-		};
-		const client = new BridgeClient(
-			{ sessionId: "omp-123", port: 9131 },
-			{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
-			() => socket,
-		);
-		client.connect();
-		socket.onopen?.();
-		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
-		client.setReverseControl(
-			() => {},
-			() => [{ type: "state_update", state: "processing" }],
-		);
-		client.forwardEvent({ type: "prompt_options", question: "Allow bash?" });
-		expect(sent.length).toBe(1);
-		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "foreign" }));
-		client.forwardEvent({ type: "prompt_options", question: "Allow bash?" });
-		expect(sent.length).toBe(1);
-		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
-		expect(JSON.parse(sent[1])).toEqual({
-			type: "session_event_up",
+test("forwards relayed events only while focused", () => {
+	const sent: string[] = [];
+	const socket = {
+		readyState: 1,
+		onopen: null as (() => void) | null,
+		onclose: null as (() => void) | null,
+		onmessage: null as ((data: string) => void) | null,
+		send(data: string) {
+			sent.push(data);
+		},
+		close() {},
+	};
+	const client = new BridgeClient(
+		{ sessionId: "omp-123", port: 9131 },
+		{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
+		() => socket,
+	);
+	client.connect();
+	socket.onopen?.();
+	socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+	client.setReverseControl(
+		() => {},
+		() => [{ type: "state_update", state: "processing" }],
+	);
+	client.forwardEvent({ type: "prompt_options", question: "Allow bash?" });
+	expect(sent.length).toBe(1);
+	socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "foreign" }));
+	client.forwardEvent({ type: "prompt_options", question: "Allow bash?" });
+	expect(sent.length).toBe(1);
+	socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+	expect(JSON.parse(sent[1])).toEqual({
+		type: "session_event_up",
+		sessionId: "omp-123",
+		event: { type: "state_update", state: "processing" },
+	});
+	client.forwardEvent({ type: "prompt_options", question: "Allow bash?" });
+	client.forwardEvent({ type: "user_prompt", text: "hi" });
+	expect(sent.length).toBe(3);
+	expect(JSON.parse(sent[2]).event.type).toBe("prompt_options");
+	socket.onmessage?.(JSON.stringify({ type: "session_unfocus_down", sessionId: "omp-123" }));
+	client.forwardEvent({ type: "prompt_options", question: "Allow bash?" });
+	expect(sent.length).toBe(3);
+});
+
+test("reports focus state", () => {
+	const socket = {
+		readyState: 1,
+		onopen: null as (() => void) | null,
+		onclose: null as (() => void) | null,
+		onmessage: null as ((data: string) => void) | null,
+		send(_data: string) {},
+		close() {},
+	};
+	const client = new BridgeClient(
+		{ sessionId: "omp-123", port: 9131 },
+		{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
+		() => socket,
+	);
+	client.connect();
+	socket.onopen?.();
+	expect(client.isFocused).toBe(false);
+	socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+	expect(client.isFocused).toBe(true);
+	socket.onmessage?.(JSON.stringify({ type: "session_unfocus_down", sessionId: "omp-123" }));
+	expect(client.isFocused).toBe(false);
+});
+
+test("routes daemon commands to the handler, ignores foreign sessions", () => {
+	const applied: unknown[] = [];
+	const socket = {
+		readyState: 1,
+		onopen: null as (() => void) | null,
+		onclose: null as (() => void) | null,
+		onmessage: null as ((data: string) => void) | null,
+		send(_data: string) {},
+		close() {},
+	};
+	const client = new BridgeClient(
+		{ sessionId: "omp-123", port: 9131 },
+		{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
+		() => socket,
+	);
+	client.connect();
+	socket.onopen?.();
+	socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+	client.setReverseControl(
+		(cmd) => {
+			applied.push(cmd);
+		},
+		() => [],
+	);
+	socket.onmessage?.(
+		JSON.stringify({
+			type: "session_command_down",
+			sessionId: "foreign",
+			command: { type: "interrupt" },
+		}),
+	);
+	socket.onmessage?.(
+		JSON.stringify({
+			type: "session_command_down",
 			sessionId: "omp-123",
-			event: { type: "state_update", state: "processing" },
-		});
-		client.forwardEvent({ type: "prompt_options", question: "Allow bash?" });
-		client.forwardEvent({ type: "user_prompt", text: "hi" });
-		expect(sent.length).toBe(3);
-		expect(JSON.parse(sent[2]).event.type).toBe("prompt_options");
-		socket.onmessage?.(JSON.stringify({ type: "session_unfocus_down", sessionId: "omp-123" }));
-		client.forwardEvent({ type: "prompt_options", question: "Allow bash?" });
-		expect(sent.length).toBe(3);
-	});
+			command: { type: "send_prompt", text: "fix it" },
+		}),
+	);
+	expect(applied).toEqual([{ type: "send_prompt", text: "fix it" }]);
+});
 
-	test("reports focus state", () => {
-		const socket = {
-			readyState: 1,
-			onopen: null as (() => void) | null,
-			onclose: null as (() => void) | null,
-			onmessage: null as ((data: string) => void) | null,
-			send(_data: string) {},
-			close() {},
-		};
-		const client = new BridgeClient(
-			{ sessionId: "omp-123", port: 9131 },
-			{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
-			() => socket,
-		);
-		client.connect();
-		socket.onopen?.();
-		expect(client.isFocused).toBe(false);
-		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
-		expect(client.isFocused).toBe(true);
-		socket.onmessage?.(JSON.stringify({ type: "session_unfocus_down", sessionId: "omp-123" }));
-		expect(client.isFocused).toBe(false);
-	});
+test("reconnects with backoff and re-registers", () => {
+	const delays: number[] = [];
+	const pending: { fn: (() => void) | null } = { fn: null };
+	const sockets: {
+		onopen: (() => void) | null;
+		onclose: (() => void) | null;
+		onmessage: ((data: string) => void) | null;
+		sent: string[];
+	}[] = [];
+	const client = new BridgeClient(
+		{ sessionId: "omp-123", port: 9131 },
+		{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
+		() => {
+			const socket = {
+				readyState: 1,
+				onopen: null as (() => void) | null,
+				onclose: null as (() => void) | null,
+				onmessage: null as ((data: string) => void) | null,
+				sent: [] as string[],
+				send(data: string) {
+					this.sent.push(data);
+				},
+				close() {},
+			};
+			sockets.push(socket);
+			return socket;
+		},
+		(fn, ms) => {
+			delays.push(ms);
+			pending.fn = fn;
+		},
+	);
+	client.connect();
+	sockets[0].onopen?.();
+	sockets[0].onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+	expect(client.isConnected).toBe(true);
+	sockets[0].onclose?.();
+	expect(client.isConnected).toBe(false);
+	expect(delays.at(-1)).toBe(2000);
+	pending.fn?.();
+	sockets[1].onopen?.();
+	expect(JSON.parse(sockets[1].sent[0]).type).toBe("session_push_register");
+});
 
-	test("routes daemon commands to the handler, ignores foreign sessions", () => {
-		const applied: unknown[] = [];
-		const socket = {
-			readyState: 1,
-			onopen: null as (() => void) | null,
-			onclose: null as (() => void) | null,
-			onmessage: null as ((data: string) => void) | null,
-			send(_data: string) {},
-			close() {},
-		};
-		const client = new BridgeClient(
-			{ sessionId: "omp-123", port: 9131 },
-			{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
-			() => socket,
-		);
-		client.connect();
-		socket.onopen?.();
-		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
-		client.setReverseControl(
-			(cmd) => {
-				applied.push(cmd);
-			},
-			() => [],
-		);
-		socket.onmessage?.(
-			JSON.stringify({
-				type: "session_command_down",
-				sessionId: "foreign",
-				command: { type: "interrupt" },
-			}),
-		);
-		socket.onmessage?.(
-			JSON.stringify({
-				type: "session_command_down",
-				sessionId: "omp-123",
-				command: { type: "send_prompt", text: "fix it" },
-			}),
-		);
-		expect(applied).toEqual([{ type: "send_prompt", text: "fix it" }]);
+test("notifies once per connection establishment", () => {
+	let calls = 0;
+	const socket = {
+		readyState: 1,
+		onopen: null as (() => void) | null,
+		onclose: null as (() => void) | null,
+		onmessage: null as ((data: string) => void) | null,
+		send(_data: string) {},
+		close() {},
+	};
+	const client = new BridgeClient(
+		{ sessionId: "omp-123", port: 9131 },
+		{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
+		() => socket,
+	);
+	client.setOnConnect(() => {
+		calls += 1;
 	});
-
-	test("reconnects with backoff and re-registers", () => {
-		const delays: number[] = [];
-		const pending: { fn: (() => void) | null } = { fn: null };
-		const sockets: {
-			onopen: (() => void) | null;
-			onclose: (() => void) | null;
-			onmessage: ((data: string) => void) | null;
-			sent: string[];
-		}[] = [];
-		const client = new BridgeClient(
-			{ sessionId: "omp-123", port: 9131 },
-			{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
-			() => {
-				const socket = {
-					readyState: 1,
-					onopen: null as (() => void) | null,
-					onclose: null as (() => void) | null,
-					onmessage: null as ((data: string) => void) | null,
-					sent: [] as string[],
-					send(data: string) {
-						this.sent.push(data);
-					},
-					close() {},
-				};
-				sockets.push(socket);
-				return socket;
-			},
-			(fn, ms) => {
-				delays.push(ms);
-				pending.fn = fn;
-			},
-		);
-		client.connect();
-		sockets[0].onopen?.();
-		sockets[0].onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
-		expect(client.isConnected).toBe(true);
-		sockets[0].onclose?.();
-		expect(client.isConnected).toBe(false);
-		expect(delays.at(-1)).toBe(2000);
-		pending.fn?.();
-		sockets[1].onopen?.();
-		expect(JSON.parse(sockets[1].sent[0]).type).toBe("session_push_register");
-	});
-
-	test("notifies once per connection establishment", () => {
-		let calls = 0;
-		const socket = {
-			readyState: 1,
-			onopen: null as (() => void) | null,
-			onclose: null as (() => void) | null,
-			onmessage: null as ((data: string) => void) | null,
-			send(_data: string) {},
-			close() {},
-		};
-		const client = new BridgeClient(
-			{ sessionId: "omp-123", port: 9131 },
-			{ host: "127.0.0.1", port: 9120, sameSocketControl: true },
-			() => socket,
-		);
-		client.setOnConnect(() => {
-			calls += 1;
-		});
-		client.connect();
-		socket.onopen?.();
-		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
-		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
-		expect(calls).toBe(1);
-	});
+	client.connect();
+	socket.onopen?.();
+	socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+	socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+	expect(calls).toBe(1);
+});
 
 describe("ApprovalGate", () => {
 	test("resolves allow or deny for the open request", () => {

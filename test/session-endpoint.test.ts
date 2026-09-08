@@ -65,7 +65,11 @@ function serveFakeDaemon(): {
 					open(_ws) {},
 					message(ws, raw) {
 						const text = textOf(raw);
-						const msg = JSON.parse(text) as { type: string; sessionId?: string; event?: { type: string } & Record<string, unknown> };
+						const msg = JSON.parse(text) as {
+							type: string;
+							sessionId?: string;
+							event?: { type: string } & Record<string, unknown>;
+						};
 						received.push({ type: msg.type, raw: text });
 						if (msg.type === "session_push_register") {
 							worker = ws;
@@ -127,13 +131,17 @@ describe("session loopback endpoint", () => {
 				},
 				sendUserMessage: () => {},
 			};
-			const ctx: BridgeCtx = { abort: () => {}, isIdle: () => true, ui: { notify: () => {} }, cwd: "/repo/agentdeck-omp" };
+			const ctx: BridgeCtx = {
+				abort: () => {},
+				isIdle: () => true,
+				ui: { notify: () => {} },
+				cwd: "/repo/agentdeck-omp",
+			};
 			process.env.AGENTDECK_PORT_WINDOW = `${daemon.port}-${daemon.port}`;
 			(factory as (pi: BridgePi) => void)(pi);
 			await handlers.get("session_start")?.({ sessionId: OUR_SESSION }, ctx);
-			await waitFor(
-				"worker registration at the fake daemon",
-				() => daemon.received.some((m) => m.type === "session_push_register"),
+			await waitFor("worker registration at the fake daemon", () =>
+				daemon.received.some((m) => m.type === "session_push_register"),
 			);
 			const advertised = daemon.advertisedPort();
 			expect(typeof advertised === "number" && advertised > 0).toBe(true);
@@ -148,14 +156,10 @@ describe("session loopback endpoint", () => {
 			tui.onmessage = (event) => seen.push(JSON.parse(String(event.data)));
 			await waitFor("tui upgrade on the advertised port", () => tui.readyState === 1, 2000);
 			tui.send(JSON.stringify({ type: "client_register", clientType: "tui" }));
-			await waitFor(
-				"sessions_list through the advertised port",
-				() => seen.some((m) => m.type === "sessions_list"),
-			);
+			await waitFor("sessions_list through the advertised port", () => seen.some((m) => m.type === "sessions_list"));
 			expect(seen.find((m) => m.type === "sessions_list")?.sessions?.some((s) => s.id === OUR_SESSION)).toBe(true);
-			await waitFor(
-				"focused live state for this session",
-				() => seen.some((m) => m.type === "state_update" && m.sessionId === OUR_SESSION && m.state === "processing"),
+			await waitFor("focused live state for this session", () =>
+				seen.some((m) => m.type === "state_update" && m.sessionId === OUR_SESSION && m.state === "processing"),
 			);
 			expect(daemon.focused()).toBe(OUR_SESSION);
 
@@ -280,7 +284,8 @@ describe("session loopback endpoint", () => {
 		let bursts = 0;
 		const burst = () => {
 			bursts += 1;
-			for (const d of dashboards) d.send(JSON.stringify({ type: "state_update", sessionId: OUR_SESSION, state: "disconnected" }));
+			for (const d of dashboards)
+				d.send(JSON.stringify({ type: "state_update", sessionId: OUR_SESSION, state: "disconnected" }));
 		};
 		let daemon: { port: number; stop(): void } | null = null;
 		for (let port = 9139; port >= 9131; port--) {
@@ -348,7 +353,12 @@ describe("session loopback endpoint", () => {
 				},
 				sendUserMessage: () => {},
 			};
-			const ctx: BridgeCtx = { abort: () => {}, isIdle: () => true, ui: { notify: () => {} }, cwd: "/repo/agentdeck-omp" };
+			const ctx: BridgeCtx = {
+				abort: () => {},
+				isIdle: () => true,
+				ui: { notify: () => {} },
+				cwd: "/repo/agentdeck-omp",
+			};
 			process.env.AGENTDECK_PORT_WINDOW = `${daemon.port}-${daemon.port}`;
 			(factory as (pi: BridgePi) => void)(pi);
 			await handlers.get("session_start")?.({ sessionId: OUR_SESSION }, ctx);
@@ -360,9 +370,8 @@ describe("session loopback endpoint", () => {
 			await waitFor("tui upgrade", () => tui.readyState === 1, 2000);
 			tui.send(JSON.stringify({ type: "client_register", clientType: "tui" }));
 			await waitFor("sessions_list", () => seen.some((m) => m.type === "sessions_list"));
-			await waitFor(
-				"live state surviving the burst",
-				() => seen.some((m) => m.type === "state_update" && m.sessionId === OUR_SESSION && m.state === "processing"),
+			await waitFor("live state surviving the burst", () =>
+				seen.some((m) => m.type === "state_update" && m.sessionId === OUR_SESSION && m.state === "processing"),
 			);
 			const liveState = () => seen.filter((m) => m.type === "state_update").at(-1)?.state;
 			expect(liveState()).toBe("processing");

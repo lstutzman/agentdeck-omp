@@ -1,10 +1,57 @@
 import { describe, expect, test } from "bun:test";
 import {
-	decisionFromSelectOption,
+	askAnswerReason,
+	askQuestionsFromInput,
+	deckPermissionModeForOmp,
 	deckStateForOmpEvent,
 	deckUsageForOmp,
+	promptOptionsForAsk,
 	promptOptionsForToolCall,
 } from "../src/mapping.js";
+
+describe("ask tool mapping", () => {
+	test("turns each ask question into a multi_select prompt with its option labels", () => {
+		const questions = askQuestionsFromInput({
+			questions: [
+				{
+					id: "db",
+					question: "Which store?",
+					options: [{ label: "SQLite" }, { label: "Postgres", description: "shared" }],
+				},
+				{ id: "auth", question: "Which auth?", options: [{ label: "JWT" }, { label: "Cookies" }] },
+			],
+		});
+		expect(questions?.length).toBe(2);
+		expect(promptOptionsForAsk(questions![0]!)).toEqual({
+			promptType: "multi_select",
+			question: "Which store?",
+			options: [
+				{ index: 0, label: "SQLite" },
+				{ index: 1, label: "Postgres" },
+			],
+		});
+	});
+
+	test("rejects input that is not a well-formed ask call", () => {
+		expect(askQuestionsFromInput({ command: "ls" })).toBeNull();
+		expect(askQuestionsFromInput({ questions: [{ question: "q", options: [] }] })).toBeNull();
+	});
+
+	test("states every answer in the block reason so the model continues without asking again", () => {
+		const reason = askAnswerReason([{ question: "Which store?", labels: ["SQLite", "Postgres"] }], [1]);
+		expect(reason).toContain("Which store?");
+		expect(reason).toContain("Postgres");
+		expect(reason).not.toContain("SQLite");
+	});
+});
+
+describe("deckPermissionModeForOmp", () => {
+	test("maps OMP approval modes onto the deck's permission modes", () => {
+		expect(deckPermissionModeForOmp("yolo")).toBe("bypassPermissions");
+		expect(deckPermissionModeForOmp("write")).toBe("acceptEdits");
+		expect(deckPermissionModeForOmp("always-ask")).toBe("default");
+	});
+});
 
 describe("deckStateForOmpEvent", () => {
 	test("maps agent lifecycle to deck states", () => {
@@ -42,24 +89,11 @@ describe("promptOptionsForToolCall", () => {
 	});
 });
 
-describe("decisionFromSelectOption", () => {
-	test("index 0 allows, index 1 denies", () => {
-		expect(decisionFromSelectOption(0, "q")).toBe("allow");
-		expect(decisionFromSelectOption(1, "q")).toBe("deny");
-	});
-
-	test("stale question echo is rejected", () => {
-		expect(decisionFromSelectOption(0, "old question", "new question")).toBeNull();
-	});
-
-	test("out-of-range index is rejected", () => {
-		expect(decisionFromSelectOption(7, "q")).toBeNull();
-	});
-});
-
 describe("deckUsageForOmp", () => {
 	test("maps usage stats to the usage_update event shape", () => {
-		expect(deckUsageForOmp({ stats: { input: 1200, output: 300, cost: 0.042 }, toolCalls: 4, startedAtMs: 0, nowMs: 90500 })).toEqual({
+		expect(
+			deckUsageForOmp({ stats: { input: 1200, output: 300, cost: 0.042 }, toolCalls: 4, startedAtMs: 0, nowMs: 90500 }),
+		).toEqual({
 			type: "usage_update",
 			sessionDurationSec: 90,
 			inputTokens: 1200,
@@ -70,7 +104,9 @@ describe("deckUsageForOmp", () => {
 	});
 
 	test("omits estimated cost when zero", () => {
-		expect(deckUsageForOmp({ stats: { input: 10, output: 5, cost: 0 }, toolCalls: 1, startedAtMs: 0, nowMs: 1500 })).toEqual({
+		expect(
+			deckUsageForOmp({ stats: { input: 10, output: 5, cost: 0 }, toolCalls: 1, startedAtMs: 0, nowMs: 1500 }),
+		).toEqual({
 			type: "usage_update",
 			sessionDurationSec: 1,
 			inputTokens: 10,

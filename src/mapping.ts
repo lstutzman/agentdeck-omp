@@ -33,16 +33,33 @@ export function deckStateForOmpEvent(event: OmpLifecycleEvent): DeckSessionState
 			return "processing";
 	}
 }
+/** OMP `ApprovalMode` (`tools/approval.ts`) → upstream `PermissionMode` enum values. */
+export type OmpApprovalMode = "always-ask" | "write" | "yolo";
+export type DeckPermissionMode = "default" | "acceptEdits" | "bypassPermissions";
+
+/** OMP's default is `yolo`; the deck shows `bypassPermissions` in purple for it. */
+export const DEFAULT_DECK_PERMISSION_MODE: DeckPermissionMode = "bypassPermissions";
+
+export function deckPermissionModeForOmp(mode: OmpApprovalMode): DeckPermissionMode {
+	switch (mode) {
+		case "yolo":
+			return "bypassPermissions";
+		case "write":
+			return "acceptEdits";
+		case "always-ask":
+			return "default";
+	}
+}
 
 export interface DeckPromptOption {
-	index: 0 | 1;
-	label: "Allow" | "Deny";
+	index: number;
+	label: string;
 }
 
 export interface DeckPromptOptions {
-	promptType: "yes_no";
+	promptType: "yes_no" | "multi_select";
 	question: string;
-	options: [DeckPromptOption, DeckPromptOption];
+	options: DeckPromptOption[];
 }
 
 const QUESTION_MAX_CHARS = 280;
@@ -57,21 +74,16 @@ function summarizeToolInput(toolName: string, input: Record<string, unknown>): s
 		}
 		return undefined;
 	};
-	const headline =
-		pick("command", "path", "paths", "file", "pattern", "url", "text", "prompt", "message") ?? toolName;
+	const headline = pick("command", "path", "paths", "file", "pattern", "url", "text", "prompt", "message") ?? toolName;
 	return headline.length > 160 ? `${headline.slice(0, 157)}…` : headline;
 }
 
 /** Approval question for a gated tool call. Fixed Allow/Deny order — index 0 always allows. */
-export function promptOptionsForToolCall(
-	toolName: string,
-	input: Record<string, unknown>,
-): DeckPromptOptions {
+export function promptOptionsForToolCall(toolName: string, input: Record<string, unknown>): DeckPromptOptions {
 	const question = `Allow ${toolName}? ${summarizeToolInput(toolName, input)}`;
 	return {
 		promptType: "yes_no",
-		question:
-			question.length > QUESTION_MAX_CHARS ? `${question.slice(0, QUESTION_MAX_CHARS - 1)}…` : question,
+		question: question.length > QUESTION_MAX_CHARS ? `${question.slice(0, QUESTION_MAX_CHARS - 1)}…` : question,
 		options: [
 			{ index: 0, label: "Allow" },
 			{ index: 1, label: "Deny" },
@@ -79,24 +91,60 @@ export function promptOptionsForToolCall(
 	};
 }
 
-export type DeckDecision = "allow" | "deny";
+/** One `ask` question reduced to what the deck can show: the text and its option labels. */
+export interface AskQuestion {
+	question: string;
+	labels: string[];
+}
 
 /**
- * Resolve a deck `select_option` answer to a gate decision.
- * Returns null when the answer must not apply: stale question echo (the
- * session moved on) or an out-of-range index. Fail closed — null means the
- * caller falls back to the timeout path, never to allow.
+ * Parse an OMP `ask` tool input (`questions[].{question, options[].label}`).
+ * Null when the shape is not a well-formed ask call; the caller then treats
+ * it as an ordinary tool. Every question must carry at least one option.
  */
-export function decisionFromSelectOption(
-	index: number,
-	askedQuestion: string,
-	currentQuestion?: string,
-): DeckDecision | null {
-	if (currentQuestion !== undefined && currentQuestion !== askedQuestion) return null;
-	if (index === 0) return "allow";
-	if (index === 1) return "deny";
-	return null;
+export function askQuestionsFromInput(input: Record<string, unknown>): AskQuestion[] | null {
+	const raw = input.questions;
+	if (!Array.isArray(raw) || raw.length === 0) return null;
+	const questions: AskQuestion[] = [];
+	for (const item of raw) {
+		if (!item || typeof item !== "object" || !("question" in item) || !("options" in item)) return null;
+		const { question, options } = item;
+		if (typeof question !== "string" || question === "" || !Array.isArray(options)) return null;
+		const labels: string[] = [];
+		for (const option of options) {
+			if (!option || typeof option !== "object" || !("label" in option)) return null;
+			if (typeof option.label !== "string" || option.label === "") return null;
+			labels.push(option.label);
+		}
+		if (labels.length === 0) return null;
+		questions.push({ question, labels });
+	}
+	return questions;
 }
+
+/** Deck prompt for one ask question; option index is the position in the ask's option list. */
+export function promptOptionsForAsk(question: AskQuestion): DeckPromptOptions {
+	return {
+		promptType: "multi_select",
+		question:
+			question.question.length > QUESTION_MAX_CHARS
+				? `${question.question.slice(0, QUESTION_MAX_CHARS - 1)}…`
+				: question.question,
+		options: question.labels.map((label, index) => ({ index, label })),
+	};
+}
+
+/**
+ * Block reason that carries the deck answers back to the model. OMP cannot
+ * substitute a tool result, so the answer rides the block reason exactly as
+ * the upstream ask-gate does for Claude Code.
+ */
+export function askAnswerReason(questions: AskQuestion[], answers: number[]): string {
+	const lines = questions.map((q, i) => `${q.question} → ${q.labels[answers[i] ?? -1] ?? "(no answer)"}`);
+	return `The user answered from AgentDeck; do not ask again.\n${lines.join("\n")}`;
+}
+
+export type DeckDecision = "allow" | "deny";
 
 export interface OmpUsageStats {
 	input: number;

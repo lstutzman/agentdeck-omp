@@ -99,23 +99,31 @@ Remaining boundaries:
 - The Swift daemon lacks `sameSocketControl:true`; the daily service is now
   the Node daemon (see the deployment note above).
 - Model name, session usage (input/output tokens, cost, tool calls,
-  duration), and `currentTool` are live; verified 2026-09-08 by
-  `bun scripts/live-smoke.mjs` against the daily daemon on 9120: registration
-  carried `modelName`, the gate's `state_update` carried `currentTool:"read"`,
-  and a `usage_update` with `inputTokens > 0` followed each real turn.
-  `currentTool` names the executing tool from `tool_call` until
-  `tool_result`/`agent_end`; a blocked call clears it immediately.
-- Parity with Claude Code observed sessions stops at upstream or OMP limits,
-  each checked against source: `agentType` (upstream `AgentType` has no OMP
-  member); `permissionMode` stays `default` (OMP's `ExtensionContext` has no
-  approval-mode getter and `tool_approval_requested` never fires in `yolo`);
-  `user_prompt` (daemon `RELAYED_EVENTS` relays only `state_update`,
-  `prompt_options`, `usage_update`); context percent (no push-route field);
-  answering OMP's `ask` tool from the deck (`ToolCallEventResult` cannot
-  substitute a result); subagent census, timeline, and APME (hook-only
-  ingest). `navigate_option` and `switch_mode` remain no-ops because OMP
-  exposes no extension API for approval-mode changes or native prompt
-  navigation.
+  duration), `currentTool`, `agentType:"omp"`, `permissionMode`, and the
+  ask-gate are live; verified 2026-09-08 by `bun scripts/live-smoke.mjs`
+  against the daily daemon on 9120: the session list carried `modelName`,
+  `agentType:"omp"`, and `permissionMode:"bypassPermissions"`; the gate's
+  `state_update` carried `currentTool:"read"`; a `usage_update` with
+  `inputTokens > 0` followed each real turn; a real `ask` call surfaced as a
+  `multi_select` prompt, the deck's pick came back to the model, and the
+  model's reply named it. `currentTool` names the executing tool from
+  `tool_call` until `tool_result`/`agent_end`; a blocked call clears it.
+- `agentType:"omp"` is not an upstream `AgentType` member: the deck renders
+  the neutral accent and its fallback glyph. Omitting it is worse — the slot
+  renderer defaults a missing type to `claude-code`. An OMP glyph needs an
+  upstream `AgentType` member.
+- `permissionMode` starts at `bypassPermissions` (OMP's default `yolo`) and
+  follows `tool_approval_requested.approvalMode` when that fires (`write` →
+  `acceptEdits`, `always-ask` → `default`). OMP has no approval-mode getter.
+- Parity with Claude Code observed sessions still stops at upstream limits,
+  each checked against source: `user_prompt`/`goal` (daemon `RELAYED_EVENTS`
+  relays only `state_update`, `prompt_options`, `usage_update`; the push
+  route accepts no `goal`); context percent (`SessionInfo.contextPercent`
+  exists but the push route and remote projection never fill it, and the
+  Stream Deck plugin does not render it); subagent census, timeline, and
+  APME (hook-only ingest). `navigate_option` and `switch_mode` remain no-ops:
+  OMP exposes no extension API for approval-mode changes or native prompt
+  navigation, and the ask-gate makes cursor navigation unnecessary.
 - Supplied question or request-ID mismatches are rejected. Legacy commands
   may omit both. Identical question text does not identify a unique request.
 - The worker route is internal upstream protocol. No upstream source changes

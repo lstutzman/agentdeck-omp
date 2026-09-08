@@ -19,11 +19,19 @@ import {
 	type SessionRoute,
 } from "./agentdeck.js";
 import {
+	askAnswerReason,
+	askQuestionsFromInput,
+	DEFAULT_DECK_PERMISSION_MODE,
+	deckPermissionModeForOmp,
 	deckStateForOmpEvent,
 	deckUsageForOmp,
+	promptOptionsForAsk,
 	promptOptionsForToolCall,
+	type AskQuestion,
+	type DeckPermissionMode,
 	type DeckPromptOptions,
 	type DeckSessionState,
+	type OmpApprovalMode,
 } from "./mapping.js";
 
 /** Minimal OMP context surface this binding drives. */
@@ -67,8 +75,8 @@ export interface ToolCallResult {
 }
 
 const DEFAULT_PORTS: number[] = [
-	9120, 9121, 9122, 9123, 9124, 9125, 9126, 9127, 9128, 9129,
-	9130, 9131, 9132, 9133, 9134, 9135, 9136, 9137, 9138, 9139,
+	9120, 9121, 9122, 9123, 9124, 9125, 9126, 9127, 9128, 9129, 9130, 9131, 9132, 9133, 9134, 9135, 9136, 9137, 9138,
+	9139,
 ];
 
 /** Last path segment; mirrors the daemon's own project-name fallback. */
@@ -96,16 +104,54 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 	let lastCtx: BridgeCtx | null = null;
 	/** Tool OMP is executing right now (`tool_call` → `tool_result`/`agent_end`). */
 	let runningTool: string | null = null;
-	const gate = new ApprovalGate(deps.gateSchedule ?? ((fn, ms) => {
-		const timer = setTimeout(fn, ms) as unknown as { unref?: () => void };
-		timer.unref?.();
-	}), deps.gateTimeoutMs ?? 25000);
+	/**
+	 * OMP exposes no approval-mode getter; `tool_approval_requested` carries
+	 * it and fires only when a prompt is needed, so a yolo session keeps the default.
+	 */
+	let permissionMode: DeckPermissionMode = DEFAULT_DECK_PERMISSION_MODE;
+	const gate = new ApprovalGate(
+		deps.gateSchedule ??
+			((fn, ms) => {
+				const timer = setTimeout(fn, ms) as unknown as { unref?: () => void };
+				timer.unref?.();
+			}),
+		deps.gateTimeoutMs ?? 25000,
+	);
+	/** An `ask` call held open: the deck answers its questions one at a time. */
+	interface AskHold {
+		questions: AskQuestion[];
+		answers: number[];
+	}
 	let pending: {
 		requestId: string;
 		tool: string;
 		prompt: DeckPromptOptions;
 		resolve: (result: ToolCallResult | undefined) => void;
+		ask?: AskHold | undefined;
 	} | null = null;
+
+	/**
+	 * Hold `toolName` behind a deck prompt. An unanswered hold releases to
+	 * local handling (`undefined`): the tool runs, OMP's own UI takes over.
+	 */
+	const hold = (
+		toolName: string,
+		prompt: DeckPromptOptions,
+		resolve: (result: ToolCallResult | undefined) => void,
+		ask?: AskHold | undefined,
+	) => {
+		const { requestId } = gate.open(prompt.question, () => {
+			if (pending?.requestId !== requestId) return;
+			pending = null;
+			push("processing");
+			resolve(undefined);
+		});
+		// A replaced gate falls back to local instead of hanging.
+		pending?.resolve(undefined);
+		pending = { requestId, tool: toolName, prompt, resolve, ask };
+		push("awaiting_permission");
+		client?.forwardEvent({ type: "prompt_options", ...prompt, requestId });
+	};
 
 	const stateUpdate = (): PluginCommand => {
 		const modelName = lastCtx?.model?.name;
@@ -114,11 +160,11 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			...(runningTool === null ? {} : { currentTool: runningTool }),
 		};
 		return pending === null
-			? { type: "state_update", state: deckState, permissionMode: "default", ...tagged }
+			? { type: "state_update", state: deckState, permissionMode, ...tagged }
 			: {
 					type: "state_update",
 					state: "awaiting_permission",
-					permissionMode: "default",
+					permissionMode,
 					question: pending.prompt.question,
 					options: pending.prompt.options,
 					...tagged,
@@ -128,7 +174,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 
 	const push = (state: DeckSessionState) => {
 		deckState = state;
-		client?.pushState(state, lastCtx?.model?.name);
+		client?.pushState(state, permissionMode, lastCtx?.model?.name);
 		client?.forwardEvent(stateUpdate());
 	};
 
@@ -160,10 +206,32 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		}
 		if (cmd.type === "select_option" && typeof cmd.index === "number") {
 			if (!pending) return;
+			if (pending.ask) {
+				const chosen = gate.answer(
+					cmd.index,
+					pending.requestId,
+					pending.prompt.question,
+					pending.prompt.options.length,
+				);
+				if (chosen === null) return;
+				const { questions, answers } = pending.ask;
+				answers.push(chosen);
+				const next = questions[answers.length];
+				if (next === undefined) {
+					settle({ block: true, reason: askAnswerReason(questions, answers) });
+				} else {
+					const { tool, resolve } = pending;
+					pending = null;
+					hold(tool, promptOptionsForAsk(next), resolve, { questions, answers });
+				}
+				return;
+			}
 			const decision = gate.decide(cmd.index, pending.requestId, pending.prompt.question);
 			if (decision === "allow") settle(undefined);
 			else if (decision === "deny") settle(DENIED);
 		} else if (cmd.type === "respond" && typeof cmd.value === "string") {
+			// A yes/no reply has no meaning for an ask question.
+			if (pending?.ask) return;
 			settle(/^(y|a)/i.test(cmd.value.trim()) ? undefined : DENIED);
 		} else if (cmd.type === "send_prompt" && typeof cmd.text === "string") {
 			pi.sendUserMessage(cmd.text);
@@ -182,19 +250,10 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		runningTool = toolName;
 		push(deckStateForOmpEvent("tool_call"));
 		if (!client?.isConnected || !client.isFocused) return undefined;
-		const prompt = promptOptionsForToolCall(toolName, input);
+		const questions = toolName === "ask" ? askQuestionsFromInput(input) : null;
 		return new Promise<ToolCallResult | undefined>((resolve) => {
-			const { requestId } = gate.open(prompt.question, () => {
-				if (pending?.requestId !== requestId) return;
-				pending = null;
-				push("processing");
-				resolve(undefined);
-			});
-			// A replaced gate falls back to local instead of hanging.
-			pending?.resolve(undefined);
-			pending = { requestId, tool: toolName, prompt, resolve };
-			push("awaiting_permission");
-			client?.forwardEvent({ type: "prompt_options", ...prompt, requestId });
+			if (questions) hold(toolName, promptOptionsForAsk(questions[0]!), resolve, { questions, answers: [] });
+			else hold(toolName, promptOptionsForToolCall(toolName, input), resolve);
 		});
 	});
 
@@ -204,6 +263,15 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			push(deckStateForOmpEvent(event));
 		});
 	}
+	pi.on("tool_approval_requested", (event, ctx) => {
+		lastCtx = ctx;
+		if (event && typeof event === "object" && "approvalMode" in event) {
+			const mode = event.approvalMode;
+			if (mode === "always-ask" || mode === "write" || mode === "yolo") {
+				permissionMode = deckPermissionModeForOmp(mode);
+			}
+		}
+	});
 	pi.on("tool_result", (_event, ctx) => {
 		lastCtx = ctx;
 		runningTool = null;
@@ -252,12 +320,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			];
 		};
 		deps.onSessionRoute?.({ session, target, snapshot });
-		client = new BridgeClient(
-			session,
-			{ ...target, sameSocketControl: true },
-			deps.createSocket,
-			deps.clientSchedule,
-		);
+		client = new BridgeClient(session, { ...target, sameSocketControl: true }, deps.createSocket, deps.clientSchedule);
 		client.setReverseControl(applyCommand, snapshot);
 		let warnedUnacked = false;
 		client.setOnAckTimeout(() => {
