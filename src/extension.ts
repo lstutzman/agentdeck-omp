@@ -27,6 +27,7 @@ import {
 	deckUsageForOmp,
 	promptOptionsForAsk,
 	promptOptionsForToolCall,
+	toolGateTier,
 	type AskQuestion,
 	type DeckPermissionMode,
 	type DeckPromptOptions,
@@ -117,6 +118,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 			}),
 		deps.gateTimeoutMs ?? 25000,
 	);
+	const alwaysAllowedTools = new Set<string>();
 	/** An `ask` call held open: the deck answers its questions one at a time. */
 	interface AskHold {
 		questions: AskQuestion[];
@@ -220,14 +222,9 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		}
 		if (cmd.type === "select_option" && typeof cmd.index === "number") {
 			if (!pending) return;
+			const chosen = gate.answer(cmd.index, pending.requestId, pending.prompt.question, pending.prompt.options.length);
+			if (chosen === null) return;
 			if (pending.ask) {
-				const chosen = gate.answer(
-					cmd.index,
-					pending.requestId,
-					pending.prompt.question,
-					pending.prompt.options.length,
-				);
-				if (chosen === null) return;
 				const { questions, answers } = pending.ask;
 				answers.push(chosen);
 				const next = questions[answers.length];
@@ -240,9 +237,9 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 				}
 				return;
 			}
-			const decision = gate.decide(cmd.index, pending.requestId, pending.prompt.question);
-			if (decision === "allow") settle(undefined);
-			else if (decision === "deny") settle(DENIED);
+			if (chosen === 1) alwaysAllowedTools.add(pending.tool);
+			if (chosen === 0 || chosen === 1) settle(undefined);
+			else if (chosen === 2) settle(DENIED);
 		} else if (cmd.type === "respond" && typeof cmd.value === "string") {
 			// A yes/no reply has no meaning for an ask question.
 			if (pending?.ask) return;
@@ -265,6 +262,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		push(deckStateForOmpEvent("tool_call"));
 		if (!client?.isConnected || !client.isFocused) return undefined;
 		const questions = toolName === "ask" ? askQuestionsFromInput(input) : null;
+		if (toolName !== "ask" && (toolGateTier(toolName) === "read" || alwaysAllowedTools.has(toolName))) return undefined;
 		return new Promise<ToolCallResult | undefined>((resolve) => {
 			if (questions) hold(toolName, promptOptionsForAsk(questions[0]!), resolve, { questions, answers: [] });
 			else hold(toolName, promptOptionsForToolCall(toolName, input), resolve);

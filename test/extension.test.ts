@@ -228,10 +228,11 @@ describe("registerBridge", () => {
 			.map((raw) => JSON.parse(raw))
 			.find((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options");
 		expect(prompt.event.question).toContain("bash");
-		expect(prompt.event.promptType).toBe("yes_no");
+		expect(prompt.event.promptType).toBe("yes_no_always");
 		expect(prompt.event.options).toEqual([
 			{ index: 0, label: "Allow" },
-			{ index: 1, label: "Deny" },
+			{ index: 1, label: "Always" },
+			{ index: 2, label: "Deny" },
 		]);
 		socket.onmessage?.(
 			JSON.stringify({
@@ -240,6 +241,109 @@ describe("registerBridge", () => {
 				command: { type: "select_option", index: 0, requestId: prompt.event.requestId },
 			}),
 		);
+		expect(await result).toBe(undefined);
+	});
+	test("Always applies only to one tool in one OMP session", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const prompts = () =>
+			socket.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options")
+				.map((msg) => msg.event);
+
+		const first = pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx);
+		const bashPrompt = prompts().at(-1);
+		expect(bashPrompt.promptType).toBe("yes_no_always");
+		expect(bashPrompt.options).toEqual([
+			{ index: 0, label: "Allow" },
+			{ index: 1, label: "Always" },
+			{ index: 2, label: "Deny" },
+		]);
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "select_option", index: 1, requestId: bashPrompt.requestId },
+			}),
+		);
+		expect(await first).toBe(undefined);
+
+		const promptCount = prompts().length;
+		expect(await pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx)).toBe(undefined);
+		expect(prompts().length).toBe(promptCount);
+
+		const write = pi.handlers.get("tool_call")?.({ toolName: "write", input: { path: "out" } }, ctx);
+		const writePrompt = prompts().at(-1);
+		expect(prompts().length).toBe(promptCount + 1);
+		expect(writePrompt.question).toContain("write");
+		socket.onmessage?.(
+			JSON.stringify({
+				type: "session_command_down",
+				sessionId: "omp-123",
+				command: { type: "select_option", index: 0, requestId: writePrompt.requestId },
+			}),
+		);
+		expect(await write).toBe(undefined);
+
+		const fresh = fakePi();
+		const freshSocket = fakeSocket();
+		registerBridge(fresh.pi, {
+			sessionId: "omp-456",
+			bridgePort: 9132,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => freshSocket,
+		});
+		await fresh.pi.handlers.get("session_start")?.({}, fresh.ctx);
+		freshSocket.onopen?.();
+		freshSocket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-456" }));
+		freshSocket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-456" }));
+		void fresh.pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, fresh.ctx);
+		const freshPrompts = freshSocket.sent
+			.map((raw) => JSON.parse(raw))
+			.filter((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options");
+		expect(freshPrompts.length).toBe(1);
+	});
+	test("focused read-tier tools bypass device approval", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+
+		const result = pi.handlers.get("tool_call")?.({ toolName: "read", input: { path: "package.json" } }, ctx);
+
+		const events = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.filter((msg) => msg.type === "session_event_up")
+			.map((msg) => msg.event);
+		expect(events.filter((event) => event.type === "prompt_options")).toEqual([]);
+		expect(events.filter((event) => event.type === "state_update").at(-1)).toEqual({
+			type: "state_update",
+			state: "processing",
+			permissionMode: "bypassPermissions",
+			currentTool: "read",
+		});
 		expect(await result).toBe(undefined);
 	});
 	test("answers a focused ask call from the deck through the block reason", async () => {
@@ -472,7 +576,7 @@ describe("registerBridge", () => {
 			JSON.stringify({
 				type: "session_command_down",
 				sessionId: "omp-123",
-				command: { type: "select_option", index: 1, requestId: prompt.event.requestId },
+				command: { type: "select_option", index: 2, requestId: prompt.event.requestId },
 			}),
 		);
 		const decided = (await result) as { block?: boolean; reason?: string };
@@ -802,7 +906,7 @@ describe("registerBridge", () => {
 		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
 		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
 		const first = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, ctx);
-		const second = pi.handlers.get("tool_call")?.({ toolName: "read", input: {} }, ctx);
+		const second = pi.handlers.get("tool_call")?.({ toolName: "write", input: {} }, ctx);
 		// The replaced gate must fall back to local instead of hanging.
 		expect(await first).toBe(undefined);
 		const prompts = socket.sent
@@ -833,7 +937,7 @@ describe("registerBridge", () => {
 		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
 		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
 		const first = pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, ctx);
-		const second = pi.handlers.get("tool_call")?.({ toolName: "read", input: {} }, ctx);
+		const second = pi.handlers.get("tool_call")?.({ toolName: "write", input: {} }, ctx);
 		const prompts = socket.sent
 			.map((raw) => JSON.parse(raw))
 			.filter((msg) => msg.type === "session_event_up" && msg.event.type === "prompt_options");
@@ -842,7 +946,7 @@ describe("registerBridge", () => {
 			JSON.stringify({
 				type: "session_command_down",
 				sessionId: "omp-123",
-				command: { type: "select_option", index: 1, requestId: prompts[0].event.requestId },
+				command: { type: "select_option", index: 2, requestId: prompts[0].event.requestId },
 			}),
 		);
 		// Fresh allow for the current gate: releases it.

@@ -7,6 +7,7 @@ import {
 	deckUsageForOmp,
 	promptOptionsForAsk,
 	promptOptionsForToolCall,
+	toolGateTier,
 } from "../src/mapping.js";
 
 describe("ask tool mapping", () => {
@@ -68,14 +69,28 @@ describe("deckStateForOmpEvent", () => {
 	});
 });
 
+describe("toolGateTier", () => {
+	test("classifies only known read-only tools as read tier", () => {
+		expect(toolGateTier("read")).toBe("read");
+		expect(toolGateTier("grep")).toBe("read");
+		expect(toolGateTier("glob")).toBe("read");
+		expect(toolGateTier("web_search")).toBe("approval");
+		expect(toolGateTier("bash")).toBe("approval");
+		expect(toolGateTier("write")).toBe("approval");
+		expect(toolGateTier("edit")).toBe("approval");
+		expect(toolGateTier("unknown-tool")).toBe("approval");
+	});
+});
+
 describe("promptOptionsForToolCall", () => {
-	test("builds structured yes/no options for a gated tool", () => {
+	test("builds structured Allow/Always/Deny options for a gated tool", () => {
 		const prompt = promptOptionsForToolCall("bash", { command: "rm -rf /tmp/x" });
 		expect(prompt.question).toContain("bash");
-		expect(prompt.promptType).toBe("yes_no");
+		expect(prompt.promptType).toBe("yes_no_always");
 		expect(prompt.options).toEqual([
 			{ index: 0, label: "Allow" },
-			{ index: 1, label: "Deny" },
+			{ index: 1, label: "Always" },
+			{ index: 2, label: "Deny" },
 		]);
 	});
 

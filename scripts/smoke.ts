@@ -3,11 +3,11 @@
  * the REAL extension entry (`src/index.ts`) over real sockets.
  *
  * Flow: session_start → register/ack → idle → focus → agent_start →
- * tool_call held → select_option(deny) blocks → tool_call again →
- * select_option(allow) releases → superseded gate falls back to local →
- * stale deny ignored, fresh allow releases → send_prompt delivers →
- * interrupt aborts → daemon restart → re-register + live state re-push →
- * shutdown disconnects. Any mismatch throws; exit code is the verdict.
+ * bash denied → read bypasses approval → bash allowed → superseded gate
+ * falls back to local → stale deny ignored, fresh allow releases → Always
+ * persists for bash → send_prompt delivers → interrupt aborts → daemon
+ * restart → re-register + live state re-push → shutdown disconnects.
+ * Any mismatch throws; exit code is the verdict.
  */
 import factory from "../src/index.js";
 
@@ -123,10 +123,8 @@ const ctx = {
 (factory as (pi: unknown) => void)(pi);
 await handlers.get("session_start")?.({ sessionId: "smoke-1" }, ctx);
 await waitFor("socket connected", () => connections >= 1);
-await waitFor(
-	"register acked",
-	() =>
-		daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "idle"),
+await waitFor("register acked", () =>
+	daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "idle"),
 );
 const register = JSON.parse(daemonReceived.find((m) => m.type === "session_push_register")!.raw);
 assert(register.sessionId === "smoke-1", "register carries the OMP session id");
@@ -134,10 +132,8 @@ assert(register.remoteAttach === true, "register sets remoteAttach to the capabl
 assert(register.projectName === "agentdeck-omp", "register carries the project basename");
 
 await handlers.get("agent_start")?.({}, ctx);
-await waitFor(
-	"processing pushed",
-	() =>
-		daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "processing"),
+await waitFor("processing pushed", () =>
+	daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "processing"),
 );
 assert(true, "agent_start pushes processing");
 
@@ -150,21 +146,41 @@ assert(true, "focused tool_call emits prompt_options");
 const promptEvent = promptOptions()[0];
 assert(
 	promptEvent.question.includes("bash") &&
-		promptEvent.promptType === "yes_no" &&
+		promptEvent.promptType === "yes_no_always" &&
 		JSON.stringify(promptEvent.options) ===
 			JSON.stringify([
 				{ index: 0, label: "Allow" },
-				{ index: 1, label: "Deny" },
+				{ index: 1, label: "Always" },
+				{ index: 2, label: "Deny" },
 			]),
-	"approval question uses the structured yes/no contract",
+	"approval question uses the structured allow/always/deny contract",
 );
 
-sendDown(downCommand({ type: "select_option", index: 1, requestId: promptEvent.requestId }));
+sendDown(downCommand({ type: "select_option", index: 2, requestId: promptEvent.requestId }));
 const denied = (await held) as { block?: boolean; reason?: string };
 assert(denied?.block === true && typeof denied?.reason === "string", "deny blocks with a reason");
 
-const allowed = handlers.get("tool_call")?.({ toolName: "read", input: { path: "src/index.ts" } }, ctx);
-await waitFor("second prompt emitted", () => promptOptions().length >= 2);
+// Read-tier tools bypass the gate: no prompt is emitted and the call runs locally.
+const bypassBase = promptOptions().length;
+const bypassed = handlers.get("tool_call")?.({ toolName: "read", input: { path: "src/index.ts" } }, ctx);
+assert((await bypassed) === undefined, "read bypasses the gate");
+await new Promise((r) => setTimeout(r, 50));
+assert(promptOptions().length === bypassBase, "bypassed read emits no prompt_options");
+assert(
+	daemonReceived
+		.map((m) => JSON.parse(m.raw))
+		.some(
+			(m) =>
+				m.type === "session_event_up" &&
+				m.event.type === "state_update" &&
+				m.event.state === "processing" &&
+				m.event.currentTool === "read",
+		),
+	"bypassed read reports current tool activity",
+);
+
+const allowed = handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx);
+await waitFor("second prompt emitted", () => promptOptions().length >= bypassBase + 1);
 const prompt2 = promptOptions().at(-1)!;
 sendDown(downCommand({ type: "select_option", index: 0, requestId: prompt2.requestId }));
 assert((await allowed) === undefined, "allow releases the gate");
@@ -173,13 +189,26 @@ assert((await allowed) === undefined, "allow releases the gate");
 // back to local, and a late answer to it never touches the current gate.
 const staleBase = promptOptions().length;
 const first = handlers.get("tool_call")?.({ toolName: "bash", input: { command: "id" } }, ctx);
-const second = handlers.get("tool_call")?.({ toolName: "read", input: { path: "DESIGN.md" } }, ctx);
+const second = handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx);
 await waitFor("superseding prompt emitted", () => promptOptions().length >= staleBase + 2);
 const [stalePrompt, livePrompt] = promptOptions().slice(-2);
 assert((await first) === undefined, "superseded gate falls back to local");
-sendDown(downCommand({ type: "select_option", index: 1, requestId: stalePrompt.requestId }));
+sendDown(downCommand({ type: "select_option", index: 2, requestId: stalePrompt.requestId }));
 sendDown(downCommand({ type: "select_option", index: 0, requestId: livePrompt.requestId }));
 assert((await second) === undefined, "stale deny ignored, fresh allow releases");
+// Always leg: index 1 releases this call and every later call for the
+// same tool on this bridge; the follow-up emits no new prompt.
+const alwaysBase = promptOptions().length;
+const alwaysCall = handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx);
+await waitFor("always prompt emitted", () => promptOptions().length >= alwaysBase + 1);
+const alwaysPrompt = promptOptions().at(-1)!;
+sendDown(downCommand({ type: "select_option", index: 1, requestId: alwaysPrompt.requestId }));
+assert((await alwaysCall) === undefined, "always releases the gate");
+const persistedBase = promptOptions().length;
+const persisted = handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx);
+assert((await persisted) === undefined, "always persists for the same tool");
+await new Promise((r) => setTimeout(r, 50));
+assert(promptOptions().length === persistedBase, "persisted always emits no new prompt_options");
 
 sendDown(downCommand({ type: "send_prompt", text: "fix it" }));
 sendDown(downCommand({ type: "interrupt" }));
@@ -202,27 +231,21 @@ await waitFor(
 assert(true, "restart re-registers without a new session");
 const secondRegisterAt = daemonReceived.findIndex(
 	(m, i) =>
-		m.type === "session_push_register" &&
-		daemonReceived.findIndex((n) => n.type === "session_push_register") !== i,
+		m.type === "session_push_register" && daemonReceived.findIndex((n) => n.type === "session_push_register") !== i,
 );
 await waitFor(
 	"live state re-pushed",
 	() =>
 		daemonReceived.some(
-			(m, i) =>
-				i > secondRegisterAt &&
-				m.type === "session_push_state" &&
-				JSON.parse(m.raw).state === "processing",
+			(m, i) => i > secondRegisterAt && m.type === "session_push_state" && JSON.parse(m.raw).state === "processing",
 		),
 	8000,
 );
 assert(true, "restart re-pushes live processing state");
 
 await handlers.get("session_shutdown")?.({}, ctx);
-await waitFor(
-	"disconnected pushed",
-	() =>
-		daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "disconnected"),
+await waitFor("disconnected pushed", () =>
+	daemonReceived.some((m) => m.type === "session_push_state" && JSON.parse(m.raw).state === "disconnected"),
 );
 assert(true, "shutdown pushes disconnected");
 

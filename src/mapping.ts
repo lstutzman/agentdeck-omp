@@ -57,9 +57,23 @@ export interface DeckPromptOption {
 }
 
 export interface DeckPromptOptions {
-	promptType: "yes_no" | "multi_select";
+	promptType: "yes_no" | "yes_no_always" | "multi_select";
 	question: string;
 	options: DeckPromptOption[];
+}
+
+export type ToolGateTier = "read" | "approval";
+
+/** Unknown tools require approval; only known side-effect-free tools bypass the deck gate. */
+export function toolGateTier(toolName: string): ToolGateTier {
+	switch (toolName) {
+		case "read":
+		case "grep":
+		case "glob":
+			return "read";
+		default:
+			return "approval";
+	}
 }
 
 const QUESTION_MAX_CHARS = 280;
@@ -78,15 +92,16 @@ function summarizeToolInput(toolName: string, input: Record<string, unknown>): s
 	return headline.length > 160 ? `${headline.slice(0, 157)}…` : headline;
 }
 
-/** Approval question for a gated tool call. Fixed Allow/Deny order — index 0 always allows. */
+/** Approval question for a gated tool call. Fixed Allow/Always/Deny option order. */
 export function promptOptionsForToolCall(toolName: string, input: Record<string, unknown>): DeckPromptOptions {
 	const question = `Allow ${toolName}? ${summarizeToolInput(toolName, input)}`;
 	return {
-		promptType: "yes_no",
+		promptType: "yes_no_always",
 		question: question.length > QUESTION_MAX_CHARS ? `${question.slice(0, QUESTION_MAX_CHARS - 1)}…` : question,
 		options: [
 			{ index: 0, label: "Allow" },
-			{ index: 1, label: "Deny" },
+			{ index: 1, label: "Always" },
+			{ index: 2, label: "Deny" },
 		],
 	};
 }

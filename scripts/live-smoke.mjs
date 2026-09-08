@@ -34,7 +34,7 @@ const child = Bun.spawn(
 		"--no-rules",
 		"--no-lsp",
 		"--tools",
-		"read,ask",
+		"read,bash,ask",
 		"--approval-mode",
 		"yolo",
 		"--max-time",
@@ -42,7 +42,7 @@ const child = Bun.spawn(
 		"--model",
 		process.env.OMP_TEST_MODEL ?? "openai-codex/gpt-6-astra",
 		"--system-prompt",
-		"You are a read-only integration test. For each new user request, call read exactly once on the requested file, even if a previous request read it, unless the request names the ask tool: then call ask exactly once as instructed. Do not retry within a request if denied. Never modify files. Keep answers brief.",
+		"You are an integration test. For each new user request, make exactly one tool call exactly once as instructed: read on the requested file, bash with the requested command, or ask as instructed, even if a previous request did the same. Do not retry within a request if denied. Never modify files. Keep answers brief.",
 	],
 	{ stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, AGENTDECK_PORT_WINDOW: `${port}-${port}` } },
 );
@@ -102,36 +102,66 @@ try {
 	assert.equal(idleSnapshot.suggestedPrompt, "Approved", "idle quick-send prompt");
 	const send = (command) => socket.send(JSON.stringify({ ...command, sessionId }));
 	console.log("PASS real OMP registration and advertised endpoint session switching");
+	{
+		const startDeck = deck.length;
+		const startRpc = rpc.length;
+		send({
+			type: "send_prompt",
+			text: "New bypass scenario: read package.json exactly once with the read tool and report the package name. Do not reuse earlier results.",
+		});
+		await until(() => rpc.slice(startRpc).some((x) => x.type === "tool_execution_end"), "bypassed read result");
+		const result = rpc.slice(startRpc).find((x) => x.type === "tool_execution_end");
+		assert.equal(result.isError, false);
+		assert(JSON.stringify(result.result).includes("agentdeck-omp"));
+		await until(
+			() => rpc.slice(startRpc).some((x) => x.type === "agent_end" && x.isTerminal !== false),
+			"bypass turn completion",
+		);
+		await until(
+			() =>
+				deck.slice(startDeck).some((x) => x.type === "usage_update" && x.sessionId === sessionId && x.inputTokens > 0),
+			"usage after bypass turn",
+		);
+		assert(!deck.slice(startDeck).some((x) => x.type === "prompt_options"), "bypassed read emits no prompt");
+		assert(
+			deck
+				.slice(startDeck)
+				.some((x) => x.type === "state_update" && x.state === "processing" && x.currentTool === "read"),
+			"bypassed read reports current tool activity",
+		);
+		console.log("PASS real read bypass executes without approval");
+	}
 	for (const [index, expectedError] of [
-		[1, true],
+		[2, true],
 		[0, false],
 	]) {
 		const startDeck = deck.length;
 		const startRpc = rpc.length;
 		send({
 			type: "send_prompt",
-			text: `New independent ${expectedError ? "denial" : "allow"} scenario: read package.json exactly once with the read tool and report the package name. Do not reuse earlier results. If this call is denied, say DENIED and stop this turn.`,
+			text: `New independent ${expectedError ? "denial" : "allow"} scenario: run bash exactly once with command pwd and report the working directory. Do not reuse earlier results. If this call is denied, say DENIED and stop this turn.`,
 		});
 		await until(
 			() => deck.slice(startDeck).some((x) => x.type === "prompt_options" && x.question),
-			"real read approval",
+			"real bash approval",
 		);
 		const prompt = deck.slice(startDeck).find((x) => x.type === "prompt_options" && x.question);
-		assert.equal(prompt.promptType, "yes_no");
+		assert.equal(prompt.promptType, "yes_no_always");
 		assert.deepEqual(prompt.options, [
 			{ index: 0, label: "Allow" },
-			{ index: 1, label: "Deny" },
+			{ index: 1, label: "Always" },
+			{ index: 2, label: "Deny" },
 		]);
 		assert(
 			deck
 				.slice(startDeck)
-				.some((x) => x.type === "state_update" && x.state === "awaiting_permission" && x.currentTool === "read"),
+				.some((x) => x.type === "state_update" && x.state === "awaiting_permission" && x.currentTool === "bash"),
 		);
 		send({ type: "select_option", index, question: prompt.question });
 		await until(() => rpc.slice(startRpc).some((x) => x.type === "tool_execution_end"), "tool result");
 		const result = rpc.slice(startRpc).find((x) => x.type === "tool_execution_end");
 		assert.equal(result.isError, expectedError);
-		assert(JSON.stringify(result.result).includes(expectedError ? "denied" : "agentdeck-omp"));
+		assert(JSON.stringify(result.result).includes(expectedError ? "denied" : "/"));
 		await until(
 			() => rpc.slice(startRpc).some((x) => x.type === "agent_end" && x.isTerminal !== false),
 			"turn completion",
@@ -148,7 +178,7 @@ try {
 		const rpcStart = rpc.length;
 		send({
 			type: "send_prompt",
-			text: "New interruption scenario: use read exactly once on package.json. Do not reuse earlier results.",
+			text: "New interruption scenario: run bash exactly once with command pwd. Do not reuse earlier results.",
 		});
 		await until(
 			() => deck.slice(gateStart).some((x) => x.type === "prompt_options" && x.question),
@@ -276,7 +306,7 @@ try {
 		const rpcStart = rpc.length;
 		send({
 			type: "send_prompt",
-			text: "New reconnect scenario: use read exactly once on package.json. Do not reuse earlier results.",
+			text: "New reconnect scenario: run bash exactly once with command pwd. Do not reuse earlier results.",
 		});
 		await until(
 			() => deck.slice(gateStart).some((x) => x.type === "prompt_options" && x.question),
@@ -312,10 +342,54 @@ try {
 			"pending approval restored",
 		);
 		const restored = deck.slice(reconnectStart).find((x) => x.type === "prompt_options" && x.question);
-		send({ type: "select_option", index: 1, question: restored.question });
+		send({ type: "select_option", index: 2, question: restored.question });
 		await until(() => rpc.slice(rpcStart).some((x) => x.type === "tool_execution_end"), "post-reconnect denial");
 		assert.equal(rpc.slice(rpcStart).find((x) => x.type === "tool_execution_end").isError, true);
 		console.log("PASS real reconnect preserves session and pending approval");
+	}
+	{
+		const startDeck = deck.length;
+		const startRpc = rpc.length;
+		send({
+			type: "send_prompt",
+			text: "New Always scenario: run bash exactly once with command pwd and report the working directory. Do not reuse earlier results.",
+		});
+		await until(
+			() => deck.slice(startDeck).some((x) => x.type === "prompt_options" && x.question),
+			"real bash Always gate",
+		);
+		const prompt = deck.slice(startDeck).find((x) => x.type === "prompt_options" && x.question);
+		assert.equal(prompt.promptType, "yes_no_always");
+		send({ type: "select_option", index: 1, question: prompt.question });
+		await until(() => rpc.slice(startRpc).some((x) => x.type === "tool_execution_end"), "Always tool result");
+		const first = rpc.slice(startRpc).find((x) => x.type === "tool_execution_end");
+		assert.equal(first.isError, false);
+		assert(JSON.stringify(first.result).includes("/"));
+		await until(
+			() => rpc.slice(startRpc).some((x) => x.type === "agent_end" && x.isTerminal !== false),
+			"Always turn completion",
+		);
+		await until(
+			() =>
+				deck.slice(startDeck).some((x) => x.type === "usage_update" && x.sessionId === sessionId && x.inputTokens > 0),
+			"usage after Always turn",
+		);
+		const followDeck = deck.length;
+		const followRpc = rpc.length;
+		send({
+			type: "send_prompt",
+			text: "New Always follow-up: run bash exactly once with command pwd again and report the working directory. Do not reuse earlier results.",
+		});
+		await until(() => rpc.slice(followRpc).some((x) => x.type === "tool_execution_end"), "persisted bash result");
+		const follow = rpc.slice(followRpc).find((x) => x.type === "tool_execution_end");
+		assert.equal(follow.isError, false);
+		assert(JSON.stringify(follow.result).includes("/"));
+		await until(
+			() => rpc.slice(followRpc).some((x) => x.type === "agent_end" && x.isTerminal !== false),
+			"persisted turn completion",
+		);
+		assert(!deck.slice(followDeck).some((x) => x.type === "prompt_options"), "persisted Always emits no new prompt");
+		console.log("PASS real Always persists for bash without another prompt");
 	}
 	assert(!rpc.some((x) => x.type === "extension_error"));
 } finally {
