@@ -98,14 +98,24 @@ Remaining boundaries:
 
 - The Swift daemon lacks `sameSocketControl:true`; the daily service is now
   the Node daemon (see the deployment note above).
-- Model name and session usage (input/output tokens, cost, tool calls,
-  duration) are live; verified 2026-09-08 by `bun scripts/live-smoke.mjs`
-  against the daily daemon on 9120: registration carried `modelName`, and a
-  `usage_update` with `inputTokens > 0` followed each real turn. Context
-  utilization, tool-progress detail, subagent activity, and timeline parity are
-  absent. `navigate_option` and `switch_mode` remain no-ops because OMP exposes
-  no extension API for approval-mode changes or native prompt navigation. This
-  gate does not implement OMP's native question UI.
+- Model name, session usage (input/output tokens, cost, tool calls,
+  duration), and `currentTool` are live; verified 2026-09-08 by
+  `bun scripts/live-smoke.mjs` against the daily daemon on 9120: registration
+  carried `modelName`, the gate's `state_update` carried `currentTool:"read"`,
+  and a `usage_update` with `inputTokens > 0` followed each real turn.
+  `currentTool` names the executing tool from `tool_call` until
+  `tool_result`/`agent_end`; a blocked call clears it immediately.
+- Parity with Claude Code observed sessions stops at upstream or OMP limits,
+  each checked against source: `agentType` (upstream `AgentType` has no OMP
+  member); `permissionMode` stays `default` (OMP's `ExtensionContext` has no
+  approval-mode getter and `tool_approval_requested` never fires in `yolo`);
+  `user_prompt` (daemon `RELAYED_EVENTS` relays only `state_update`,
+  `prompt_options`, `usage_update`); context percent (no push-route field);
+  answering OMP's `ask` tool from the deck (`ToolCallEventResult` cannot
+  substitute a result); subagent census, timeline, and APME (hook-only
+  ingest). `navigate_option` and `switch_mode` remain no-ops because OMP
+  exposes no extension API for approval-mode changes or native prompt
+  navigation.
 - Supplied question or request-ID mismatches are rejected. Legacy commands
   may omit both. Identical question text does not identify a unique request.
 - The worker route is internal upstream protocol. No upstream source changes

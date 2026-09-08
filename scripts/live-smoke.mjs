@@ -78,7 +78,7 @@ try {
     const prompt = deck.slice(startDeck).find((x) => x.type === "prompt_options" && x.question);
     assert.equal(prompt.promptType, "yes_no");
     assert.deepEqual(prompt.options, [{ index: 0, label: "Allow" }, { index: 1, label: "Deny" }]);
-    assert(deck.slice(startDeck).some((x) => x.type === "state_update" && x.state === "awaiting_permission"));
+    assert(deck.slice(startDeck).some((x) => x.type === "state_update" && x.state === "awaiting_permission" && x.currentTool === "read"));
     send({ type: "select_option", index, question: prompt.question });
     await until(() => rpc.slice(startRpc).some((x) => x.type === "tool_execution_end"), "tool result");
     const result = rpc.slice(startRpc).find((x) => x.type === "tool_execution_end");

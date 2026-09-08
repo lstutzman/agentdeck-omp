@@ -115,6 +115,31 @@ describe("registerBridge", () => {
 		expect(states().at(-1)).toBe("disconnected");
 		expect(closed).toBe(true);
 	});
+	test("names the running tool on state_update until its result arrives", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		await pi.handlers.get("session_start")?.({}, ctx);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		// Unfocused: no gate opens, the tool simply runs.
+		await pi.handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx);
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const updates = () =>
+			socket.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_event_up" && msg.event.type === "state_update")
+				.map((msg) => msg.event);
+		expect(updates().at(-1)).toEqual({ type: "state_update", state: "processing", permissionMode: "default", currentTool: "bash" });
+		await pi.handlers.get("tool_result")?.({ toolName: "bash" }, ctx);
+		expect(updates().at(-1)).toEqual({ type: "state_update", state: "processing", permissionMode: "default" });
+	});
 	test("holds a focused tool call for device approval, allow releases", async () => {
 		const { pi, ctx } = fakePi();
 		const socket = fakeSocket();
@@ -179,7 +204,7 @@ describe("registerBridge", () => {
 			type: "state_update",
 			state: "awaiting_permission",
 			permissionMode: "default",
-			tool: "bash",
+			currentTool: "bash",
 			question: prompt.question,
 			options: prompt.options,
 		});
@@ -200,6 +225,7 @@ describe("registerBridge", () => {
 			type: "state_update",
 			state: "processing",
 			permissionMode: "default",
+			currentTool: "bash",
 		});
 	});
 

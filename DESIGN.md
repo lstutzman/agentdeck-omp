@@ -120,7 +120,12 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   its native prompts (`ApprovalMode` is observe-only; `ctx.ui` presents
   dialogs but cannot navigate OMP's own).
 - Full display snapshots use `permissionMode:"default"`. This describes the
-  bridge display, not OMP's native approval policy.
+  bridge display, not OMP's native approval policy; OMP exposes no
+  approval-mode getter to extensions.
+- `currentTool` is the tool named by the latest `tool_call` until
+  `tool_result` or `agent_end`. While a gate is held it is the gated tool; a
+  Deny or interrupt clears it because the call never runs, an Allow keeps it
+  because the call now executes.
 
 ## 6. Files
 

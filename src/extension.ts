@@ -94,6 +94,8 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 	let toolCalls = 0;
 	let startedAtMs = 0;
 	let lastCtx: BridgeCtx | null = null;
+	/** Tool OMP is executing right now (`tool_call` → `tool_result`/`agent_end`). */
+	let runningTool: string | null = null;
 	const gate = new ApprovalGate(deps.gateSchedule ?? ((fn, ms) => {
 		const timer = setTimeout(fn, ms) as unknown as { unref?: () => void };
 		timer.unref?.();
@@ -107,17 +109,20 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 
 	const stateUpdate = (): PluginCommand => {
 		const modelName = lastCtx?.model?.name;
-		const tagged = modelName === undefined ? {} : { modelName };
+		const tagged = {
+			...(modelName === undefined ? {} : { modelName }),
+			...(runningTool === null ? {} : { currentTool: runningTool }),
+		};
 		return pending === null
 			? { type: "state_update", state: deckState, permissionMode: "default", ...tagged }
 			: {
 					type: "state_update",
 					state: "awaiting_permission",
 					permissionMode: "default",
-					tool: pending.tool,
 					question: pending.prompt.question,
 					options: pending.prompt.options,
 					...tagged,
+					currentTool: pending.tool,
 				};
 	};
 
@@ -133,6 +138,19 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		return deckUsageForOmp({ stats, toolCalls, startedAtMs, nowMs: Date.now() });
 	};
 
+	const DENIED: ToolCallResult = { block: true, reason: "AgentDeck: denied from the connected dashboard." };
+	const INTERRUPTED: ToolCallResult = { block: true, reason: "AgentDeck: interrupted from the connected dashboard." };
+
+	/** Release the held gate. A blocked call never runs, so it stops being the current tool. */
+	const settle = (result: ToolCallResult | undefined) => {
+		if (!pending) return;
+		const resolve = pending.resolve;
+		pending = null;
+		if (result?.block) runningTool = null;
+		push("processing");
+		resolve(result);
+	};
+
 	const applyCommand = (cmd: PluginCommand) => {
 		if ((cmd.type === "select_option" || cmd.type === "respond") && pending !== null) {
 			// Legacy daemon commands omit correlation echoes. Because this
@@ -143,36 +161,14 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		if (cmd.type === "select_option" && typeof cmd.index === "number") {
 			if (!pending) return;
 			const decision = gate.decide(cmd.index, pending.requestId, pending.prompt.question);
-			if (decision === "allow") {
-				const resolve = pending.resolve;
-				pending = null;
-				push("processing");
-				resolve(undefined);
-			} else if (decision === "deny") {
-				const resolve = pending.resolve;
-				pending = null;
-				push("processing");
-				resolve({ block: true, reason: "AgentDeck: denied from the connected dashboard." });
-			}
+			if (decision === "allow") settle(undefined);
+			else if (decision === "deny") settle(DENIED);
 		} else if (cmd.type === "respond" && typeof cmd.value === "string") {
-			if (!pending) return;
-			const allow = /^(y|a)/i.test(cmd.value.trim());
-			const resolve = pending.resolve;
-			pending = null;
-			push("processing");
-			resolve(allow ? undefined : { block: true, reason: "AgentDeck: denied from the connected dashboard." });
+			settle(/^(y|a)/i.test(cmd.value.trim()) ? undefined : DENIED);
 		} else if (cmd.type === "send_prompt" && typeof cmd.text === "string") {
 			pi.sendUserMessage(cmd.text);
 		} else if (cmd.type === "interrupt" || cmd.type === "escape") {
-			const resolve = pending?.resolve;
-			pending = null;
-			if (resolve) {
-				push("processing");
-				resolve({
-					block: true,
-					reason: "AgentDeck: interrupted from the connected dashboard.",
-				});
-			}
+			settle(INTERRUPTED);
 			lastCtx?.abort();
 		}
 	};
@@ -183,6 +179,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		const call = event as { toolName?: unknown; input?: unknown };
 		const toolName = typeof call.toolName === "string" ? call.toolName : "tool";
 		const input = (call.input ?? {}) as Record<string, unknown>;
+		runningTool = toolName;
 		push(deckStateForOmpEvent("tool_call"));
 		if (!client?.isConnected || !client.isFocused) return undefined;
 		const prompt = promptOptionsForToolCall(toolName, input);
@@ -201,14 +198,20 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		});
 	});
 
-	for (const event of ["before_agent_start", "agent_start", "tool_result"] as const) {
+	for (const event of ["before_agent_start", "agent_start"] as const) {
 		pi.on(event, (_event, ctx) => {
 			lastCtx = ctx;
 			push(deckStateForOmpEvent(event));
 		});
 	}
+	pi.on("tool_result", (_event, ctx) => {
+		lastCtx = ctx;
+		runningTool = null;
+		push(deckStateForOmpEvent("tool_result"));
+	});
 	pi.on("agent_end", (_event, ctx) => {
 		lastCtx = ctx;
+		runningTool = null;
 		push(deckStateForOmpEvent("agent_end"));
 		const usage = usageUpdate();
 		if (usage) client?.forwardEvent(usage);
