@@ -20,6 +20,7 @@ import {
 } from "./agentdeck.js";
 import {
 	deckStateForOmpEvent,
+	deckUsageForOmp,
 	promptOptionsForToolCall,
 	type DeckPromptOptions,
 	type DeckSessionState,
@@ -31,7 +32,13 @@ export interface BridgeCtx {
 	isIdle(): boolean;
 	ui: { notify(message: string): void };
 	cwd?: string | undefined;
-	sessionManager?: { getSessionId(): string } | undefined;
+	model?: { id: string; name: string } | undefined;
+	sessionManager?:
+		| {
+				getSessionId(): string;
+				getUsageStatistics?(): { input: number; output: number; cost: number };
+		  }
+		| undefined;
 }
 
 /** Minimal OMP extension API surface this binding uses. */
@@ -84,6 +91,8 @@ function resolveSessionId(event: unknown, ctx: BridgeCtx, explicit?: string | un
 export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 	let client: BridgeClient | null = null;
 	let deckState: DeckSessionState = "idle";
+	let toolCalls = 0;
+	let startedAtMs = 0;
 	let lastCtx: BridgeCtx | null = null;
 	const gate = new ApprovalGate(deps.gateSchedule ?? ((fn, ms) => {
 		const timer = setTimeout(fn, ms) as unknown as { unref?: () => void };
@@ -96,9 +105,11 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		resolve: (result: ToolCallResult | undefined) => void;
 	} | null = null;
 
-	const stateUpdate = (): PluginCommand =>
-		pending === null
-			? { type: "state_update", state: deckState, permissionMode: "default" }
+	const stateUpdate = (): PluginCommand => {
+		const modelName = lastCtx?.model?.name;
+		const tagged = modelName === undefined ? {} : { modelName };
+		return pending === null
+			? { type: "state_update", state: deckState, permissionMode: "default", ...tagged }
 			: {
 					type: "state_update",
 					state: "awaiting_permission",
@@ -106,12 +117,20 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 					tool: pending.tool,
 					question: pending.prompt.question,
 					options: pending.prompt.options,
+					...tagged,
 				};
+	};
 
 	const push = (state: DeckSessionState) => {
 		deckState = state;
-		client?.pushState(state);
+		client?.pushState(state, lastCtx?.model?.name);
 		client?.forwardEvent(stateUpdate());
+	};
+
+	const usageUpdate = (): BridgeEvent | null => {
+		const stats = lastCtx?.sessionManager?.getUsageStatistics?.();
+		if (stats === undefined) return null;
+		return deckUsageForOmp({ stats, toolCalls, startedAtMs, nowMs: Date.now() });
 	};
 
 	const applyCommand = (cmd: PluginCommand) => {
@@ -160,6 +179,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 
 	pi.on("tool_call", async (event, ctx) => {
 		lastCtx = ctx;
+		toolCalls += 1;
 		const call = event as { toolName?: unknown; input?: unknown };
 		const toolName = typeof call.toolName === "string" ? call.toolName : "tool";
 		const input = (call.input ?? {}) as Record<string, unknown>;
@@ -181,12 +201,18 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		});
 	});
 
-	for (const event of ["before_agent_start", "agent_start", "tool_result", "agent_end"] as const) {
+	for (const event of ["before_agent_start", "agent_start", "tool_result"] as const) {
 		pi.on(event, (_event, ctx) => {
 			lastCtx = ctx;
 			push(deckStateForOmpEvent(event));
 		});
 	}
+	pi.on("agent_end", (_event, ctx) => {
+		lastCtx = ctx;
+		push(deckStateForOmpEvent("agent_end"));
+		const usage = usageUpdate();
+		if (usage) client?.forwardEvent(usage);
+	});
 	pi.on("session_shutdown", () => {
 		const resolve = pending?.resolve;
 		pending = null;
@@ -199,6 +225,7 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 
 	pi.on("session_start", async (event, ctx) => {
 		lastCtx = ctx;
+		startedAtMs = Date.now();
 		const target = await probeDaemons(deps.ports ?? DEFAULT_PORTS, deps.fetchHealth);
 		if (!target) {
 			ctx.ui.notify("AgentDeck: v1 requires the Node daemon (sameSocketControl). Telemetry off.");
@@ -213,10 +240,14 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 		// Live snapshot: the same frames the worker emits on focus_down. Shared
 		// with the loopback relay so this endpoint paints authoritative local
 		// state; the closure reads live gate state, never a cached copy.
-		const snapshot = (): BridgeEvent[] => [
-			stateUpdate(),
-			...(pending ? [{ type: "prompt_options", ...pending.prompt, requestId: pending.requestId }] : []),
-		];
+		const snapshot = (): BridgeEvent[] => {
+			const usage = usageUpdate();
+			return [
+				stateUpdate(),
+				...(usage ? [usage] : []),
+				...(pending ? [{ type: "prompt_options", ...pending.prompt, requestId: pending.requestId }] : []),
+			];
+		};
 		deps.onSessionRoute?.({ session, target, snapshot });
 		client = new BridgeClient(
 			session,

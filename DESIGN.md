@@ -77,9 +77,15 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   must not impersonate another agent.
 - Ack: expect `session_push_ack`; `isConnected` = open + acked.
 - Telemetry: `session_push_state {sessionId, state, modelName?}` on OMP
-  lifecycle changes via existing pure `deckStateForOmpEvent`. While focused,
-  also send focused `state_update` and `prompt_options` through
-  `session_event_up`. Usage telemetry is not implemented.
+  lifecycle changes via existing pure `deckStateForOmpEvent`; `modelName` is
+  `ctx.model.name` read at each push (OMP exposes no model-change event).
+  While focused, also send focused `state_update`, `prompt_options`, and
+  `usage_update` through `session_event_up`. Usage comes from
+  `ctx.sessionManager.getUsageStatistics()` (session totals: input/output
+  tokens, cost) plus a local tool-call count, emitted on `agent_end` and in
+  the focus snapshot via pure `deckUsageForOmp`. Context utilization is not
+  sent: the push route has no field for it, and no upstream consumer renders
+  it from a worker's `usage_update`.
 - Focus: on `session_focus_down`, emit a full state snapshot and the current
   structured approval options if a gate is open;
   on `session_unfocus_down` clear, stop forwarding. Ignore foreign
@@ -109,9 +115,12 @@ Act as an AgentDeck session-bridge worker over WS (pattern:
   Any supplied `requestId` or question echo must match the current gate.
   Legacy commands may omit both; identical question text cannot distinguish
   successive requests without a request ID.
-- Timeout is 25 seconds. `navigate_option` and `switch_mode` remain no-ops.
+- Timeout is 25 seconds. `navigate_option` and `switch_mode` remain no-ops:
+  OMP 18.1.11 exposes no extension API to change its approval mode or drive
+  its native prompts (`ApprovalMode` is observe-only; `ctx.ui` presents
+  dialogs but cannot navigate OMP's own).
 - Full display snapshots use `permissionMode:"default"`. This describes the
-  bridge display, not OMP's native approval policy. Model telemetry is absent.
+  bridge display, not OMP's native approval policy.
 
 ## 6. Files
 

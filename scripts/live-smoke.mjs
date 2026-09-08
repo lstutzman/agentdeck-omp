@@ -57,6 +57,7 @@ try {
   const registered = deck.findLast((x) => x.type === "sessions_list" && x.sessions.some((s) => s.id === sessionId));
   const sessionPort = registered.sessions.find((s) => s.id === sessionId).port;
   assert(Number.isInteger(sessionPort) && sessionPort > 0 && sessionPort !== port);
+  assert.equal(typeof registered.sessions.find((s) => s.id === sessionId).modelName, "string", "registered modelName");
   registrySocket.onmessage = (event) => {
     const frame = JSON.parse(String(event.data));
     if (frame.type === "sessions_list") deck.push(frame);
@@ -84,6 +85,7 @@ try {
     assert.equal(result.isError, expectedError);
     assert(JSON.stringify(result.result).includes(expectedError ? "denied" : "agentdeck-omp"));
     await until(() => rpc.slice(startRpc).some((x) => x.type === "agent_end" && x.isTerminal !== false), "turn completion");
+    await until(() => deck.slice(startDeck).some((x) => x.type === "usage_update" && x.sessionId === sessionId && x.inputTokens > 0), "usage after turn");
     console.log(`PASS real idle prompt injection and ${expectedError ? "Deny blocks" : "Allow executes"}`);
   }
   {

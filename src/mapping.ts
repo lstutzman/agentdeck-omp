@@ -97,3 +97,36 @@ export function decisionFromSelectOption(
 	if (index === 1) return "deny";
 	return null;
 }
+
+export interface OmpUsageStats {
+	input: number;
+	output: number;
+	cost: number;
+}
+
+export interface DeckUsageEvent {
+	type: "usage_update";
+	sessionDurationSec: number;
+	inputTokens: number;
+	outputTokens: number;
+	toolCalls: number;
+	estimatedCostUsd?: number | undefined;
+	[key: string]: unknown;
+}
+/** Map OMP usage statistics to the deck `usage_update` event. Cost rides only when positive. */
+export function deckUsageForOmp(args: {
+	stats: OmpUsageStats;
+	toolCalls: number;
+	startedAtMs: number;
+	nowMs: number;
+}): DeckUsageEvent {
+	const cost = args.stats.cost > 0 ? { estimatedCostUsd: args.stats.cost } : {};
+	return {
+		type: "usage_update",
+		sessionDurationSec: Math.floor((args.nowMs - args.startedAtMs) / 1000),
+		inputTokens: args.stats.input,
+		outputTokens: args.stats.output,
+		toolCalls: args.toolCalls,
+		...cost,
+	};
+}

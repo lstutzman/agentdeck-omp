@@ -25,7 +25,9 @@ Read these files when changing transport, display payloads, approvals, or the pa
 - [`bridge/src/permission-resolver.ts`](https://github.com/puritysb/AgentDeck/blob/master/bridge/src/permission-resolver.ts): Node observed-Claude approval path holds a PreToolUse HTTP response, correlates `permission_decision` by request ID, and returns Claude's hook decision. Timeout passes control back to Claude's own policy. This is different from managed-session option selection.
 - [`plugin/src/actions/option-dial.ts`](https://github.com/puritysb/AgentDeck/blob/master/plugin/src/actions/option-dial.ts): despite its historical name, this Stream Deck+ dial currently shows Claude usage. Approval interaction lives in the keypad detail view. Do not infer hardware roles from old filenames.
 
-The local bridge currently requires a daemon advertising `mode: "daemon"` and `sameSocketControl: true`. Do not infer the capability from the product name or claim installing a daemon alone fixes protocol errors. Health responses can contain pairing credentials; print only an explicit allowlist of diagnostic fields.
+The local bridge currently requires a daemon advertising `mode: "daemon"` and `sameSocketControl: true`. Do not infer the capability from the product name or claim installing a daemon alone fixes protocol errors. Health responses can contain pairing credentials; print only an explicit allowlist of diagnostic fields. `/health` carries no package version, only `build` (a content hash of the running JavaScript); a version pin is not available over HTTP. The bridge instead warns once when registration is never acknowledged, which is how a daemon that dropped the internal worker route presents.
+
+Since 2026-09-08 the daily 9120 service on this machine is the Node daemon (`@agentdeck/bridge` 1.2.1, LaunchAgent `dev.agentdeck.daemon`, installed with `agentdeck daemon install`, which also installed Claude Code hooks and the OpenCode plugin). AgentDeck.app runs in client mode beside it. Set `AGENTDECK_PORT_WINDOW=lo-hi` to restrict the extension's discovery to a throwaway daemon; the fake-daemon tests and both smoke scripts do this so they never register with the daily daemon.
 
 #### Public API boundary
 
@@ -94,17 +96,27 @@ These results establish physical Allow and Deny, not full hardware parity.
 
 Remaining boundaries:
 
-- The existing Swift service on 9120 lacks `sameSocketControl:true` and cannot
-  provide this bridge's reverse path. No service was installed or replaced.
-- Usage, cost, context utilization, model updates, tool-progress detail, subagent
-  activity, and timeline parity are absent. `navigate_option` and `switch_mode`
-  remain no-ops. This gate does not implement OMP's native question UI.
+- The Swift daemon lacks `sameSocketControl:true`; the daily service is now
+  the Node daemon (see the deployment note above).
+- Model name and session usage (input/output tokens, cost, tool calls,
+  duration) are live; verified 2026-09-08 by `bun scripts/live-smoke.mjs`
+  against the daily daemon on 9120: registration carried `modelName`, and a
+  `usage_update` with `inputTokens > 0` followed each real turn. Context
+  utilization, tool-progress detail, subagent activity, and timeline parity are
+  absent. `navigate_option` and `switch_mode` remain no-ops because OMP exposes
+  no extension API for approval-mode changes or native prompt navigation. This
+  gate does not implement OMP's native question UI.
 - Supplied question or request-ID mismatches are rejected. Legacy commands
   may omit both. Identical question text does not identify a unique request.
 - The worker route is internal upstream protocol. No upstream source changes
   were necessary for the verified control loop; no upstream PR was opened.
 - Daemon command focus remains global. A session endpoint is a display adapter,
   not a per-session authorization boundary or isolated control channel.
+- `session_command_down` is applied by session ID only. `select_option` and
+  `respond` are correlated to the open gate, but `send_prompt`, `interrupt`,
+  and `escape` carry no correlation: a command sent while this session was
+  focused but delivered after focus moved still executes here. Fencing needs
+  a focus generation in upstream command frames.
 
 ## Verification standard
 

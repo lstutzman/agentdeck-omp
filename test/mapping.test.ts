@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	decisionFromSelectOption,
 	deckStateForOmpEvent,
+	deckUsageForOmp,
 	promptOptionsForToolCall,
 } from "../src/mapping.js";
 
@@ -53,5 +54,28 @@ describe("decisionFromSelectOption", () => {
 
 	test("out-of-range index is rejected", () => {
 		expect(decisionFromSelectOption(7, "q")).toBeNull();
+	});
+});
+
+describe("deckUsageForOmp", () => {
+	test("maps usage stats to the usage_update event shape", () => {
+		expect(deckUsageForOmp({ stats: { input: 1200, output: 300, cost: 0.042 }, toolCalls: 4, startedAtMs: 0, nowMs: 90500 })).toEqual({
+			type: "usage_update",
+			sessionDurationSec: 90,
+			inputTokens: 1200,
+			outputTokens: 300,
+			toolCalls: 4,
+			estimatedCostUsd: 0.042,
+		});
+	});
+
+	test("omits estimated cost when zero", () => {
+		expect(deckUsageForOmp({ stats: { input: 10, output: 5, cost: 0 }, toolCalls: 1, startedAtMs: 0, nowMs: 1500 })).toEqual({
+			type: "usage_update",
+			sessionDurationSec: 1,
+			inputTokens: 10,
+			outputTokens: 5,
+			toolCalls: 1,
+		});
 	});
 });

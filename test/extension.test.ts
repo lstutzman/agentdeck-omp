@@ -768,4 +768,89 @@ describe("registerBridge", () => {
 		for (const fn of timers.splice(0)) fn();
 		expect(uiNotices.length).toBe(1);
 	});
+	test("carries modelName in pushed state and snapshot when ctx.model is present", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		const modeled = { ...ctx, model: { id: "openai/gpt-5", name: "gpt-5" } };
+		await pi.handlers.get("session_start")?.({}, modeled);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		const states = () => socket.sent.map((raw) => JSON.parse(raw));
+		expect(states().find((msg) => msg.type === "session_push_state")?.modelName).toBe("gpt-5");
+		const ups = states().filter((msg) => msg.type === "session_event_up");
+		expect(ups.at(-1)?.event?.modelName).toBe("gpt-5");
+	});
+	test("reports usage on agent_end and in the focus snapshot when stats are available", async () => {
+		const { pi, ctx } = fakePi();
+		const socket = fakeSocket();
+		registerBridge(pi, {
+			sessionId: "omp-123",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => socket,
+		});
+		const rich = {
+			...ctx,
+			sessionManager: {
+				getSessionId: () => "omp-123",
+				getUsageStatistics: () => ({ input: 100, output: 50, cost: 0.01 }),
+			},
+		};
+		await pi.handlers.get("session_start")?.({}, rich);
+		socket.onopen?.();
+		socket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-123" }));
+		socket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-123" }));
+		// Gated calls stay open until a device answers; count only, never await.
+		void pi.handlers.get("tool_call")?.({ toolName: "read", input: {} }, rich);
+		void pi.handlers.get("tool_call")?.({ toolName: "bash", input: {} }, rich);
+		await pi.handlers.get("agent_end")?.({}, rich);
+		const ups = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.filter((msg) => msg.type === "session_event_up" && msg.event?.type === "usage_update")
+			.map((msg) => msg.event);
+		expect(ups.length).toEqual(2);
+		expect(ups.at(-1)).toEqual({
+			type: "usage_update",
+			sessionDurationSec: ups.at(-1)?.sessionDurationSec,
+			inputTokens: 100,
+			outputTokens: 50,
+			toolCalls: 2,
+			estimatedCostUsd: 0.01,
+		});
+		expect(typeof ups.at(-1)?.sessionDurationSec).toBe("number");
+		const order = socket.sent
+			.map((raw) => JSON.parse(raw))
+			.filter((msg) => msg.type === "session_event_up")
+			.map((msg) => msg.event?.type);
+		expect(order.slice(0, 2)).toEqual(["state_update", "usage_update"]);
+
+		const spare = fakePi();
+		const plainSocket = fakeSocket();
+		registerBridge(spare.pi, {
+			sessionId: "omp-456",
+			bridgePort: 9131,
+			ports: [9120],
+			fetchHealth: async () => ({ port: 9120, mode: "daemon", sameSocketControl: true }),
+			createSocket: () => plainSocket,
+		});
+		await spare.pi.handlers.get("session_start")?.({}, spare.ctx);
+		plainSocket.onopen?.();
+		plainSocket.onmessage?.(JSON.stringify({ type: "session_push_ack", sessionId: "omp-456" }));
+		plainSocket.onmessage?.(JSON.stringify({ type: "session_focus_down", sessionId: "omp-456" }));
+		await spare.pi.handlers.get("agent_end")?.({}, spare.ctx);
+		expect(
+			plainSocket.sent
+				.map((raw) => JSON.parse(raw))
+				.filter((msg) => msg.type === "session_event_up" && msg.event?.type === "usage_update"),
+		).toEqual([]);
+	});
 });
