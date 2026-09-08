@@ -13,19 +13,22 @@ deck, canned prompt keys. Git buttons are out of scope.
 
 ## State at handoff
 
-`main` == `origin/main` at `511f377`. Working tree clean.
+Before this documentation update, `main` == `origin/main` at `3b6c572` and
+the working tree was clean.
 
-Latest commits:
+Latest code commits:
 
-- `511f377` Document the daily extension install via `~/.omp/agent/extensions` symlink.
-- `5954c87` Offer `Approved` as the idle quick-send key (`suggestedPrompt`).
-- `cbf2a22` Badge OMP sessions (`agentType:"omp"`), report the approval mode
-  (`permissionMode`), answer `ask` from the deck.
-- `8dba3cd` `currentTool` on `state_update`.
+- `3b6c572` Share the Allow, Always, and Deny option indexes between prompt
+  construction and command settlement.
+- `5cde06e` Add tiered tool gating and session-scoped Always approval.
+- `779c873` Record physical Session Slot verification.
+- `511f377` Document the daily extension install through the
+  `~/.omp/agent/extensions` symlink.
 
-Gate at `5954c87`: `bun test` 63 pass / 0 fail; `bun run check` clean;
-`bun run smoke` PASS; real smoke on 9120 six scenarios PASS (registration and
-switching, Deny, Allow, interrupt, ask, shutdown).
+Gate at `3b6c572`: `bun test` 66 pass, 0 fail, and 175 assertions;
+`bun run check` clean; `bun run smoke` PASS. Real smoke on 9120 at `5cde06e`
+passed registration and switching, read bypass, Deny, Allow, interrupt, ask,
+session-scoped Always, and shutdown.
 
 ### The daily install (this session's real finding)
 
@@ -78,8 +81,7 @@ OMP session.
    Claude slash commands to OMP); (b) swap the dynamic slot to `Explain`.
    Before wiring either, verify `send_prompt` with `/explain` triggers Lee's
    `/explain` skill in OMP.
-2. **Gated tool set** for tiered gating (below).
-3. **Tap-to-focus default**: on by default under Herdr, or opt-in env flag.
+2. **Tap-to-focus default**: on by default under Herdr, or opt-in env flag.
 
 ## Pending work, in priority order
 
@@ -87,29 +89,19 @@ Each item: one RED test at the seams, run it, GREEN, refactor; then
 `bun test && bun run check && bun run smoke`; then the real smoke on 9120;
 then commit and push to `main` (no PR, Lee's decision).
 
-1. **Tiered gating + always-allow.** Today every focused `tool_call` opens a
-   25 s gate (`src/extension.ts` `tool_call` handler -> `hold`). In a yolo
-   session this stalls `read`/`grep`/`glob`. Plan: tier map in
-   `src/mapping.ts` (no gate for read-tier tools; gate `bash`, `write`, `edit`,
-   `xd://` and similar), `promptType:"yes_no_always"` with options
-   `Allow / Always / Deny`, session-scoped always-allow set keyed by tool name
-   in `registerBridge`. The ask-gate stays unconditional. Tests: mapping test
-   for the tier map; extension test asserting no `prompt_options` for `read`
-   while focused. `scripts/live-smoke.mjs` scenarios currently rely on `read`
-   being gated; switch them to a gated tool or exercise the always-allow path.
-2. **`awaiting_option` for the ask-gate** instead of `awaiting_permission`
+1. **`awaiting_option` for the ask gate** instead of `awaiting_permission`
    (deck `State` enum: `disconnected | idle | processing |
    awaiting_permission | awaiting_option | awaiting_diff`,
    `shared/src/states.ts`). Change `stateUpdate()` when `pending.ask` is set;
-   update tests and the `live-smoke.mjs` assertion near line 127.
-3. **Herdr tap-to-focus.** On `session_focus_down`, run
+   update tests and the `live-smoke.mjs` assertion near the ask scenario.
+2. **Herdr tap-to-focus.** On `session_focus_down`, run
    `herdr agent focus "$HERDR_PANE_ID"` when `HERDR_ENV=1` and
-   `HERDR_PANE_ID` is set; suppress the focus_down that arrives within ~2 s
-   of socket open (reconnect echo). Inject a `focusTerminal` dep in
+   `HERDR_PANE_ID` is set; suppress the focus_down that arrives within about
+   two seconds of socket open (reconnect echo). Inject a `focusTerminal` dep in
    `BridgeDeps` for the test. Load `skill://herdr` before any Herdr command.
-   Upstream `focus_session` only sets daemon focus; no agent gets window
-   raising from AgentDeck itself.
-4. **Upstream issue drafts** for `puritysb/AgentDeck` (text for Lee's review,
+   Upstream `focus_session` only sets daemon focus; AgentDeck does not raise
+   the agent window.
+3. **Upstream issue drafts** for `puritysb/AgentDeck` (text for Lee's review,
    nothing posted): (1) add `omp` to `AgentType` with accent and glyph
    (`shared/src/adapter.ts:8-17`; unknown types render gray with the OpenClaw
    glyph; a missing type defaults to `claude-code`); (2) accept
