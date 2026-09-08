@@ -61,6 +61,11 @@ export interface DeckPromptOptions {
 	question: string;
 	options: DeckPromptOption[];
 }
+export const TOOL_GATE_OPTION_INDEX = {
+	allow: 0,
+	always: 1,
+	deny: 2,
+} as const;
 
 export type ToolGateTier = "read" | "approval";
 
@@ -99,9 +104,9 @@ export function promptOptionsForToolCall(toolName: string, input: Record<string,
 		promptType: "yes_no_always",
 		question: question.length > QUESTION_MAX_CHARS ? `${question.slice(0, QUESTION_MAX_CHARS - 1)}…` : question,
 		options: [
-			{ index: 0, label: "Allow" },
-			{ index: 1, label: "Always" },
-			{ index: 2, label: "Deny" },
+			{ index: TOOL_GATE_OPTION_INDEX.allow, label: "Allow" },
+			{ index: TOOL_GATE_OPTION_INDEX.always, label: "Always" },
+			{ index: TOOL_GATE_OPTION_INDEX.deny, label: "Deny" },
 		],
 	};
 }

@@ -27,6 +27,7 @@ import {
 	deckUsageForOmp,
 	promptOptionsForAsk,
 	promptOptionsForToolCall,
+	TOOL_GATE_OPTION_INDEX,
 	toolGateTier,
 	type AskQuestion,
 	type DeckPermissionMode,
@@ -237,9 +238,9 @@ export function registerBridge(pi: BridgePi, deps: BridgeDeps): void {
 				}
 				return;
 			}
-			if (chosen === 1) alwaysAllowedTools.add(pending.tool);
-			if (chosen === 0 || chosen === 1) settle(undefined);
-			else if (chosen === 2) settle(DENIED);
+			if (chosen === TOOL_GATE_OPTION_INDEX.always) alwaysAllowedTools.add(pending.tool);
+			if (chosen === TOOL_GATE_OPTION_INDEX.allow || chosen === TOOL_GATE_OPTION_INDEX.always) settle(undefined);
+			else if (chosen === TOOL_GATE_OPTION_INDEX.deny) settle(DENIED);
 		} else if (cmd.type === "respond" && typeof cmd.value === "string") {
 			// A yes/no reply has no meaning for an ask question.
 			if (pending?.ask) return;
