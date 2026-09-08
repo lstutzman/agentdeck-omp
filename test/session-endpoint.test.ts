@@ -128,6 +128,7 @@ describe("session loopback endpoint", () => {
 				sendUserMessage: () => {},
 			};
 			const ctx: BridgeCtx = { abort: () => {}, isIdle: () => true, ui: { notify: () => {} }, cwd: "/repo/agentdeck-omp" };
+			process.env.AGENTDECK_PORT_WINDOW = `${daemon.port}-${daemon.port}`;
 			(factory as (pi: BridgePi) => void)(pi);
 			await handlers.get("session_start")?.({ sessionId: OUR_SESSION }, ctx);
 			await waitFor(
@@ -348,6 +349,7 @@ describe("session loopback endpoint", () => {
 				sendUserMessage: () => {},
 			};
 			const ctx: BridgeCtx = { abort: () => {}, isIdle: () => true, ui: { notify: () => {} }, cwd: "/repo/agentdeck-omp" };
+			process.env.AGENTDECK_PORT_WINDOW = `${daemon.port}-${daemon.port}`;
 			(factory as (pi: BridgePi) => void)(pi);
 			await handlers.get("session_start")?.({ sessionId: OUR_SESSION }, ctx);
 			await waitFor("worker registration", () => advertised !== null);

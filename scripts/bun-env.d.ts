@@ -14,4 +14,4 @@ declare const Bun: {
 	}): { port: number; stop(closeActiveConnections?: boolean): void };
 };
 
-declare const process: { exit(code: number): never };
+declare const process: { exit(code: number): never; env: Record<string, string | undefined> };

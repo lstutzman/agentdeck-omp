@@ -25,6 +25,16 @@ async function fetchHealth(port: number) {
 	}
 }
 
+/** Upstream's throwaway-daemon override: restrict discovery to `lo-hi`. */
+function portWindow(): number[] | undefined {
+	const match = /^(\d+)-(\d+)$/.exec(process.env.AGENTDECK_PORT_WINDOW ?? "");
+	if (!match) return undefined;
+	const lo = Number(match[1]);
+	const hi = Number(match[2]);
+	if (lo > hi) return undefined;
+	return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+}
+
 export default function (pi: BridgePi): undefined {
 	// Bound before the worker connects so the advertised port is live by
 	// `session_start`; the route resolves via the lifecycle hook below.
@@ -32,6 +42,7 @@ export default function (pi: BridgePi): undefined {
 	const endpoint = openSessionEndpoint(() => route);
 	registerBridge(pi, {
 		bridgePort: endpoint?.port ?? 0,
+		ports: portWindow(),
 		fetchHealth,
 		createSocket: (target: ClientTarget) => adaptSocket(new WebSocket(`ws://127.0.0.1:${target.port}`)),
 		onSessionRoute: (resolved) => {

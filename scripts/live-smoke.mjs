@@ -25,7 +25,7 @@ const child = Bun.spawn([
   "--tools", "read", "--approval-mode", "yolo", "--max-time", "2m",
   "--model", process.env.OMP_TEST_MODEL ?? "openai-codex/gpt-6-astra",
   "--system-prompt", "You are a read-only integration test. For each new user request, call read exactly once on the requested file, even if a previous request read it. Do not retry within a request if denied. Never modify files. Keep answers brief.",
-], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, AGENTDECK_PORT_WINDOW: `${port}-${port}` } });
 const decoder = new TextDecoder();
 const output = (async () => {
   let pending = "";

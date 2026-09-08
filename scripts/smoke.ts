@@ -29,9 +29,8 @@ let daemonSocket: { send(data: string): void } | null = null;
 let connections = 0;
 
 function serveFakeDaemon(preferred?: number): { port: number; stop(closeActiveConnections?: boolean): void } {
-	// Bind inside the entry's probe window (9120-9139) so the normal sweep
-	// finds this daemon; the real Swift daemon on 9120 answers without the
-	// capability and must be skipped by selection, not by fetch patching.
+	// Bind inside the entry's probe window (9120-9139); AGENTDECK_PORT_WINDOW
+	// then pins discovery here so a real daemon on 9120 is never selected.
 	const ports = preferred === undefined ? [] : [preferred];
 	for (let port = 9139; port >= 9131; port--) ports.push(port);
 	for (const port of ports) {
@@ -93,6 +92,7 @@ function downCommand(command: unknown): unknown {
 
 let daemon = serveFakeDaemon();
 const daemonPort = daemon.port;
+process.env.AGENTDECK_PORT_WINDOW = `${daemonPort}-${daemonPort}`;
 console.log(`smoke: fake daemon on ${daemonPort}`);
 
 // Fake OMP host: capture handlers, prompts, aborts.
